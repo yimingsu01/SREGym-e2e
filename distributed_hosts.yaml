@@ -1,0 +1,28 @@
+# Distributed SREGym runner — node configuration
+#
+# Copy this file to distributed_hosts.yaml and fill in your CloudLab node details.
+# Each node must have SREGym cloned and dependencies installed (via the ansible playbook).
+#
+# Usage:
+#   uv run python -m distributed --hosts distributed_hosts.yaml --agent stratus --model gpt-5
+#
+# You can also point --hosts at your existing ansible inventory.yml file.
+
+nodes:
+  - host: c220g2-011325.wisc.cloudlab.us
+    user: lilygn
+    sregym_path: /users/lilygn/SREGym
+    label: node-1
+    # ssh_key: ~/.ssh/id_rsa  # optional, defaults to SSH agent
+    # port: 22                # optional, defaults to 22
+
+  - host: c220g2-010823.wisc.cloudlab.us
+    user: lilygn
+    sregym_path: /users/lilygn/SREGym
+    label: node-2
+
+  # Add more nodes as needed:
+  - host: c220g2-010912.wisc.cloudlab.us
+    user: lilygn
+    sregym_path: /users/lilygn/SREGym
+    label: node-3

@@ -193,6 +193,10 @@ def driver_loop(
                 run_dir.mkdir(parents=True, exist_ok=True)
                 os.environ["AGENT_LOGS_DIR"] = str(run_dir.resolve())
 
+                # Mount source code into agent container if the problem provides it
+                source_path = getattr(conductor.problem, "source_code_path", None)
+                LAUNCHER.set_source_code_path(str(source_path) if source_path else None)
+
                 reg = get_agent(agent_to_run, path=Path(os.path.dirname(os.path.abspath(__file__))) / "agents.yaml")
                 if reg:
                     await LAUNCHER.ensure_started(reg)

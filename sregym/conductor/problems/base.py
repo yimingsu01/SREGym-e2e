@@ -10,6 +10,7 @@ class Problem(ABC):
         self.fault_injected = False
         self.results = {}
         self.root_cause = None  # root cause of the problem in natural language
+        self.source_code_path = None  # host path to source code for code-level bug investigation
 
         # Optional: attach oracles in subclass
         self.diagnosis_oracle = None

@@ -172,6 +172,82 @@ async def get_app():
     return {"app_name": app_inst.app_name, "namespace": app_inst.namespace, "descriptions": str(app_inst.description)}
 
 
+@app.post("/cassandra/rebuild")
+async def rebuild_cassandra():
+    """Compile the agent-modified Cassandra source and deploy the new image.
+
+    The agent should call this endpoint after editing files under ``/opt/source``.
+    The endpoint:
+      1. Runs ``ant jar`` in the source tree to compile the changes (~5 min first run,
+         faster on subsequent runs due to incremental compilation).
+      2. Builds a Docker image extending the K8ssandra management API base.
+      3. Loads the image into the kind cluster.
+      4. Patches the K8ssandraCluster CR with ``serverImage`` and waits for the
+         rolling restart to complete.
+
+    Returns ``{"status": "deployed", "image": "<image:tag>"}`` on success.
+
+    Example::
+
+        curl -s -X POST http://localhost:8000/cassandra/rebuild | jq .
+    """
+    if _conductor is None:
+        raise HTTPException(status_code=400, detail="No problem is currently active")
+
+    problem = _conductor.problem
+    if not getattr(problem, "allows_rebuild", False):
+        raise HTTPException(
+            status_code=403,
+            detail="This problem does not support source rebuild (allows_rebuild is False)",
+        )
+
+    source_path = getattr(problem, "source_code_path", None)
+    if not source_path:
+        raise HTTPException(
+            status_code=400,
+            detail="This problem has no Cassandra source tree (source_code_path is not set)",
+        )
+
+    app_inst = _conductor.app
+    cassandra_version = getattr(app_inst, "cassandra_version", None)
+    if not cassandra_version:
+        raise HTTPException(
+            status_code=400,
+            detail="Active app is not a Cassandra deployment (no cassandra_version attribute)",
+        )
+
+    def _do_rebuild():
+        from pathlib import Path
+
+        from sregym.service.cassandra_build_manager import CassandraBuildManager
+
+        build_mgr = CassandraBuildManager(Path(source_path), cassandra_version)
+        new_image = build_mgr.build_from_directory()
+        app_inst.update_server_image(new_image)
+        return new_image
+
+    loop = asyncio.get_event_loop()
+    try:
+        new_image = await loop.run_in_executor(None, _do_rebuild)
+    except Exception as exc:
+        logger.error(f"Cassandra rebuild failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"status": "deployed", "image": new_image}
+
+
+@app.get("/cassandra/rebuild/status")
+async def rebuild_status():
+    """Quick health-check: confirms the rebuild endpoint is reachable and a Cassandra
+    problem is active.  Does not trigger a build."""
+    if _conductor is None:
+        return {"ready": False, "reason": "no active problem"}
+    allows = bool(getattr(_conductor.problem, "allows_rebuild", False))
+    has_source = bool(getattr(_conductor.problem, "source_code_path", None))
+    has_version = bool(getattr(_conductor.app, "cassandra_version", None))
+    return {"ready": allows and has_source and has_version, "allows_rebuild": allows, "has_source": has_source, "has_cassandra": has_version}
+
+
 @app.get("/get_problem")
 async def get_problem():
     if _conductor is None:
@@ -205,6 +281,7 @@ def run_api(conductor):
 **Available Endpoints**
 - **POST /submit**: `{ "solution": "<your-solution>" }` → grades the current stage
 - **GET /status**: returns `{ "stage": "setup" | "diagnosis" | "mitigation" | "tearing_down" | "done" }`
+- **POST /cassandra/rebuild**: recompile modified source at `/opt/source`, build new image, rolling-restart the cluster → `{ "status": "deployed", "image": "..." }`
 """
         )
     )
