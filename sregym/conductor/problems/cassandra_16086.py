@@ -76,6 +76,7 @@ metadata:
 spec:
   cassandra:
     serverVersion: "{self.cassandra_version}"
+    serverImage: "{self._mgmt_api_image(self.cassandra_version)}"
     telemetry:
       prometheus:
         enabled: true
@@ -85,7 +86,7 @@ spec:
         size: {self.cluster_size}
         storageConfig:
           cassandraDataVolumeClaimSpec:
-            storageClassName: openebs-hostpath
+            storageClassName: {self._storage_class()}
             accessModes:
               - ReadWriteOnce
             resources:
@@ -104,6 +105,7 @@ spec:
           cassandraYaml:
             tombstone_warn_threshold: 50
             tombstone_failure_threshold: {_TOMBSTONE_THRESHOLD}
+
 """
 
 

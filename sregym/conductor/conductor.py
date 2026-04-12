@@ -600,16 +600,19 @@ class Conductor:
             self.logger.info("[DEPLOY] Deploying Khaos DaemonSet...")
             self.khaos.ensure_deployed()
 
-        self.logger.info("[DEPLOY] Setting up OpenEBS…")
-        self.kubectl.exec_command("kubectl apply -f https://openebs.github.io/charts/openebs-operator.yaml")
-        self.kubectl.exec_command(
-            "kubectl patch storageclass openebs-hostpath "
-            '-p \'{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}\''
-        )
-        self.kubectl.wait_for_ready("openebs")
+        if self.kubectl.is_emulated_cluster():
+            self.logger.info("[DEPLOY] Kind cluster detected — skipping OpenEBS (using built-in 'standard' StorageClass)")
+        else:
+            self.logger.info("[DEPLOY] Setting up OpenEBS…")
+            self.kubectl.exec_command("kubectl apply -f https://openebs.github.io/charts/openebs-operator.yaml")
+            self.kubectl.exec_command(
+                "kubectl patch storageclass openebs-hostpath "
+                '-p \'{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}\''
+            )
+            self.kubectl.wait_for_ready("openebs")
 
-        print("Setting up OpenEBS LocalPV-Device…")
-        device_sc_yaml = """
+            print("Setting up OpenEBS LocalPV-Device…")
+            device_sc_yaml = """
         apiVersion: storage.k8s.io/v1
         kind: StorageClass
         metadata:
@@ -621,7 +624,7 @@ class Conductor:
         localpvType: "device"
         volumeBindingMode: WaitForFirstConsumer
         """
-        self.kubectl.exec_command("kubectl apply -f - <<EOF\n" + device_sc_yaml + "\nEOF")
+            self.kubectl.exec_command("kubectl apply -f - <<EOF\n" + device_sc_yaml + "\nEOF")
 
         self.logger.info("[DEPLOY] Deploying Prometheus…")
         self.prometheus.deploy()

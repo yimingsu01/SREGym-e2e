@@ -25,7 +25,7 @@ import subprocess
 from pathlib import Path
 
 from sregym.conductor.problems.cassandra_custom_build import CassandraCustomBuildProblem
-from sregym.service.apps.cassandra import Cassandra, CassandraWithCustomImage
+from sregym.service.apps.cassandra import Cassandra
 from sregym.utils.decorators import mark_fault_injected
 
 logger = logging.getLogger(__name__)
@@ -51,14 +51,11 @@ _SEED_CQL = "\n".join(
 _READ_CQL = "SELECT * FROM bench_ks.events;"
 
 
-class _CassandraWithOomKill(CassandraWithCustomImage):
-    """CassandraWithCustomImage that kills PID 1 on JVM OutOfMemoryError.
+class _CassandraWithOomKill(Cassandra):
+    """Cassandra with a small heap and OOM-kill JVM options pre-configured.
 
-    The k8ssandra management API (PID 1) silently restarts the Cassandra JVM
-    when it OOMs, hiding the crash from Kubernetes.  Setting
-    ``-XX:OnOutOfMemoryError=kill -9 1`` causes the JVM to send SIGKILL to
-    PID 1 (the management API itself) on OOM, making the container exit so
-    Kubernetes sees the crash and enters CrashLoopBackOff.
+    Deployed with the clean upstream image.  The buggy image is swapped in at
+    inject_fault() time via CassandraCustomBuildProblem._apply_buggy_image().
     """
 
     def _build_cluster_manifest(self) -> str:
@@ -71,14 +68,14 @@ metadata:
 spec:
   cassandra:
     serverVersion: "{self.cassandra_version}"
-    serverImage: "{self.custom_image}"
+    serverImage: "{self._mgmt_api_image(self.cassandra_version)}"
     datacenters:
       - metadata:
           name: {self.datacenter_name}
         size: {self.cluster_size}
         storageConfig:
           cassandraDataVolumeClaimSpec:
-            storageClassName: openebs-hostpath
+            storageClassName: {self._storage_class()}
             accessModes:
               - ReadWriteOnce
             resources:
@@ -93,9 +90,14 @@ spec:
             cpu: "1"
         config:
           jvmOptions:
-            heapSize: 256M
+            heapSize: 512M
             additionalJvm11ServerOptions:
               - "-XX:OnOutOfMemoryError=/usr/local/bin/oom-kill-mgmt.sh"
+        podTemplateSpec:
+          spec:
+            containers:
+              - name: server-system-logger
+                image: "{self._system_logger_image()}"
 """
 
 
@@ -137,13 +139,12 @@ class CassandraOomRead(CassandraCustomBuildProblem):
     trigger_cql = _SETUP_CQL
 
     def _create_app(self) -> Cassandra:
-        return _CassandraWithOomKill(
-            cassandra_version=self.cassandra_version,
-            custom_image=self._custom_image,
-        )
+        return _CassandraWithOomKill(cassandra_version=self.cassandra_version)
 
     @mark_fault_injected
     def inject_fault(self):
+        self._apply_buggy_image()
+
         logger.info("[CassandraOomRead] Setting up bench keyspace and seeding rows")
         self.app.run_cql(_SETUP_CQL)
         self.app.run_cql(_SEED_CQL)

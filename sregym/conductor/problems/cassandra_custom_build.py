@@ -29,23 +29,21 @@ Build pipeline
 - Overlay files from ``patch_dir`` onto the clone.
 - ``ant jar`` → produces ``build/apache-cassandra-<version>.jar`` (incremental; cached by patch hash).
 - ``docker build`` → image ``sregym/cassandra-patched:<version>-<hash8>``.
-- ``kind load docker-image`` → available inside the kind cluster.
+- ``docker push`` → image pushed to the registry so cluster nodes pull it automatically.
 - K8ssandraCluster CR uses ``serverImage: <image>`` so the operator runs the patched binary.
 - The same patched source tree is bind-mounted into the agent container at ``/opt/source``.
 
 Prerequisites
 -------------
 - Apache Ant must be installed (``brew install ant`` / ``apt-get install ant``).
-- Docker must be running.
-- The cluster must be a kind cluster (for ``kind load docker-image``); for other
-  cluster types push the image to an accessible registry instead.
+- Docker must be running and logged in to the registry hosting ``sregym/cassandra-patched``.
 """
 
 import logging
 from pathlib import Path
 
 from sregym.conductor.problems.cassandra_bug import CASSANDRA_REPO_URL, CassandraBugProblem
-from sregym.service.apps.cassandra import Cassandra, CassandraWithCustomImage
+from sregym.service.apps.cassandra import Cassandra
 from sregym.service.cassandra_build_manager import CassandraBuildManager
 from sregym.service.source_manager import SourceManager
 
@@ -84,8 +82,20 @@ class CassandraCustomBuildProblem(CassandraBugProblem):
         super().__init__()
 
     def _create_app(self) -> Cassandra:
-        """Return a Cassandra app configured to use the custom-built image."""
-        return CassandraWithCustomImage(
-            cassandra_version=self.cassandra_version,
-            custom_image=self._custom_image,
-        )
+        """Return a standard Cassandra app using the clean upstream image.
+
+        The buggy image is applied at inject_fault() time via
+        self.app.update_server_image(self._custom_image), so the cluster
+        starts healthy and the fault is genuinely injected at exercise time.
+        """
+        return Cassandra(cassandra_version=self.cassandra_version)
+
+    def _apply_buggy_image(self):
+        """Swap the running cluster to the patched (buggy) image.
+
+        Subclass inject_fault() implementations call this before triggering
+        any workload so that the fault is introduced at exercise time, not
+        at deploy time.
+        """
+        logger.info(f"[CustomBuild] Applying buggy image: {self._custom_image}")
+        self.app.update_server_image(self._custom_image)

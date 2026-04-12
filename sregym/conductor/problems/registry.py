@@ -12,7 +12,10 @@ from sregym.conductor.problems.cassandra_16086 import Cassandra16086
 from sregym.conductor.problems.cassandra_18108 import Cassandra18108
 from sregym.conductor.problems.cassandra_20050 import Cassandra20050
 from sregym.conductor.problems.cassandra_20108 import Cassandra20108
+from sregym.conductor.problems.cassandra_compaction_oom import CassandraCompactionOom
+from sregym.conductor.problems.cassandra_crash_schema_integrity import CassandraCrashSchemaIntegrity
 from sregym.conductor.problems.cassandra_oom_read import CassandraOomRead
+from sregym.conductor.problems.cassandra_write_cache_oom import CassandraWriteCacheOom
 from sregym.conductor.problems.cart_service_failure import CartServiceFailure
 from sregym.conductor.problems.configmap_drift import ConfigMapDrift
 from sregym.conductor.problems.duplicate_pvc_mounts import DuplicatePVCMounts
@@ -222,7 +225,10 @@ class ProblemRegistry:
             "cassandra_16086_tombstone_die_policy": Cassandra16086,
             "cassandra_18108_pk_rename_crash": Cassandra18108,
             "cassandra_20050_udt_desc_clustering_insert": Cassandra20050,
-            "cassandra_oom_read_diagnostic_buffer": CassandraOomRead,
+            "cassandra_oom_read_diagnostic_buffer": CassandraOomRead, #tested
+            "cassandra_compaction_oom": CassandraCompactionOom,
+            "cassandra_crash_schema_integrity": CassandraCrashSchemaIntegrity,
+            "cassandra_write_cache_oom": CassandraWriteCacheOom,
             "cassandra_20108_filter_deleted_columns": Cassandra20108,
             # ==================== DIRECT K8S API ====================
             "ingress_misroute": lambda: IngressMisroute(path="/api", correct_service="frontend-service", wrong_service="recommendation-service"),

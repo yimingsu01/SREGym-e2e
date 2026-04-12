@@ -73,6 +73,12 @@ class _CassandraWithAssertions(Cassandra):
     SSTable header only surfaces as an AssertionError at Columns.java:367
     (assert !s.kind.isPrimaryKeyKind()) when -ea is active.  Without it the
     corrupt entry is silently ignored and reads succeed.
+
+    Uses ``additionalJvm11ServerOptions: ["-ea"]`` — the same mechanism as
+    ``cassandra_oom_read.py`` — because k8ssandra-operator only recognises
+    typed ``jvmOptions`` fields (heapSize, gc, additionalJvm11ServerOptions).
+    A bare ``vm_enable_assertions: true`` is silently dropped by the operator's
+    YAML unmarshaller and never reaches the JVM.
     """
 
     def _build_cluster_manifest(self) -> str:
@@ -85,13 +91,14 @@ metadata:
 spec:
   cassandra:
     serverVersion: "{self.cassandra_version}"
+    serverImage: "{self._mgmt_api_image(self.cassandra_version)}"
     datacenters:
       - metadata:
           name: {self.datacenter_name}
         size: {self.cluster_size}
         storageConfig:
           cassandraDataVolumeClaimSpec:
-            storageClassName: openebs-hostpath
+            storageClassName: {self._storage_class()}
             accessModes:
               - ReadWriteOnce
             resources:
@@ -107,7 +114,9 @@ spec:
         config:
           jvmOptions:
             heapSize: 512M
-            vm_enable_assertions: true
+            additionalJvm11ServerOptions:
+              - "-ea"
+
 """
 
 

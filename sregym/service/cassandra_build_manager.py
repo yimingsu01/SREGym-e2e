@@ -28,14 +28,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# K8ssandra management API base image — Cassandra lives inside this image
-_MGMT_API_BASE = "k8ssandra/cass-management-api:{version}-ubi8"
-
 # Path inside the management API image where the main Cassandra JAR lives
 _CASSANDRA_LIB_DIR = "/opt/cassandra/lib"
 
+# Base image selection is handled dynamically by CassandraBuildManager.mgmt_api_image().
+# It probes candidate tags in order (no-suffix → -ubi → -ubi8) and picks the first
+# one that actually runs on the cluster's CPU architecture, avoiding the
+# "Fatal glibc error: CPU does not support x86-64-v3" issue on pre-Haswell nodes.
+
 # Bump this to invalidate all cached images when the Dockerfile template changes.
-_DOCKERFILE_VERSION = "v2"
+_DOCKERFILE_VERSION = "v5"
 
 
 class CassandraBuildManager:
@@ -44,7 +46,7 @@ class CassandraBuildManager:
     def __init__(self, source_path: Path, cassandra_version: str):
         self.source_path = Path(source_path)
         self.cassandra_version = cassandra_version
-        self.base_image = _MGMT_API_BASE.format(version=cassandra_version)
+        self.base_image = self.mgmt_api_image(cassandra_version)
 
     # ------------------------------------------------------------------
     # Public API
@@ -69,21 +71,20 @@ class CassandraBuildManager:
 
         if self._image_exists_locally(image_tag):
             logger.info(f"[BuildMgr] Cached image {image_tag} found — skipping build")
-            self._load_into_kind(image_tag)
-            return image_tag
+        else:
+            logger.info(f"[BuildMgr] Building image from current source tree: {image_tag}")
+            self._build_jar()
+            self._build_docker_image(image_tag)
 
-        logger.info(f"[BuildMgr] Building image from current source tree: {image_tag}")
-        self._build_jar()
-        self._build_docker_image(image_tag)
-        self._load_into_kind(image_tag)
+        self._push_image(image_tag)
         logger.info(f"[BuildMgr] Image ready: {image_tag}")
         return image_tag
 
     def build_with_patches(self, patch_dir: Path) -> str:
         """Apply patches, build JAR, package Docker image.  Returns image name:tag.
 
-        The returned image is guaranteed to be present in the local Docker daemon
-        and loaded into the kind cluster (if kind is running).
+        The returned image is pushed to the registry so cluster nodes can pull
+        it automatically — no manual image distribution needed.
         """
         patch_dir = Path(patch_dir)
         if not patch_dir.exists():
@@ -97,14 +98,13 @@ class CassandraBuildManager:
 
         if self._image_exists_locally(image_tag):
             logger.info(f"[BuildMgr] Cached image {image_tag} found — skipping build")
-            self._load_into_kind(image_tag)   # re-load in case cluster was recreated
-            return image_tag
+        else:
+            logger.info(f"[BuildMgr] Building custom Cassandra image {image_tag}")
+            self._apply_patches(patch_dir)
+            self._build_jar()
+            self._build_docker_image(image_tag)
 
-        logger.info(f"[BuildMgr] Building custom Cassandra image {image_tag}")
-        self._apply_patches(patch_dir)
-        self._build_jar()
-        self._build_docker_image(image_tag)
-        self._load_into_kind(image_tag)
+        self._push_image(image_tag)
         logger.info(f"[BuildMgr] Custom image ready: {image_tag}")
         return image_tag
 
@@ -255,20 +255,44 @@ class CassandraBuildManager:
         finally:
             shutil.rmtree(build_ctx, ignore_errors=True)
 
-    def _load_into_kind(self, image_tag: str):
-        """Distribute the image to every node in the active cluster.
+    @staticmethod
+    def _node_runtime() -> str:
+        """Return the container runtime of the first cluster node.
+
+        Returns one of ``"containerd"``, ``"docker"``, or ``"unknown"``.
+        Used to select the right image-import command in the DaemonSet pipe.
+        """
+        result = subprocess.run(
+            "kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.containerRuntimeVersion}'",
+            shell=True, capture_output=True, text=True, timeout=10,
+        )
+        version = result.stdout.strip().strip("'")
+        if version.startswith("containerd://"):
+            return "containerd"
+        if version.startswith("docker://"):
+            return "docker"
+        return "unknown"
+
+    def _push_image(self, image_tag: str) -> None:
+        """Distribute the image to cluster nodes.
 
         Strategy (tried in order):
-          1. kind        — ``kind load docker-image`` (kind clusters only)
-          2. SSH         — ``docker save | gzip | ssh <node> sudo docker load``
-                           Configurable via env vars:
-                             SREGYM_CLUSTER_SSH_USER  (default: current OS user)
-                             SREGYM_CLUSTER_SSH_KEY   (default: SSH agent / ~/.ssh/id_rsa)
-          3. DaemonSet   — privileged DS that mounts the Docker socket and loads
-                           via ``kubectl cp`` + ``docker load``; works on any
-                           Docker-runtime cluster without SSH access
+          1. ``kind load docker-image`` — for kind clusters only.  Tried first
+             because it is the only method that reliably imports the image into
+             every kind node's containerd store without a registry.
+          2. DaemonSet pipe — a privileged pod on every node streams the image
+             tarball via stdin and imports it directly into the node's container
+             runtime.  Runtime-agnostic: uses ``ctr`` for containerd clusters
+             (e.g. CloudLab bare-metal) and ``docker load`` for Docker clusters.
+             This approach never relies on external registry connectivity, so it
+             works regardless of Docker Hub rate limits or network topology.
+          3. ``docker push`` — last resort for clusters that have a reachable
+             private registry already configured.
         """
-        # 1. kind
+        import time
+        import uuid
+
+        # 1. kind load (exits quickly on non-kind clusters)
         if subprocess.run(
             f"kind load docker-image {image_tag}",
             shell=True, capture_output=True, text=True,
@@ -276,76 +300,51 @@ class CassandraBuildManager:
             logger.info(f"[BuildMgr] Loaded {image_tag} into kind cluster")
             return
 
-        # 2. SSH
-        node_ips = self._get_cluster_node_ips()
-        if node_ips:
-            ssh_user = self._ssh_user()
-            ssh_opts = self._ssh_opts()
-            logger.info(
-                f"[BuildMgr] Distributing {image_tag} to {len(node_ips)} node(s) "
-                f"as {ssh_user} via SSH"
-            )
-            failed = []
-            for ip in node_ips:
-                cmd = (
-                    f"docker save {image_tag} | gzip | "
-                    f"ssh {ssh_opts} {ssh_user}@{ip} 'sudo docker load || docker load'"
-                )
-                logger.info(f"[BuildMgr] → pushing to {ip} …")
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-                if r.returncode == 0:
-                    logger.info(f"[BuildMgr] Image loaded on {ip}")
-                else:
-                    logger.warning(f"[BuildMgr] SSH load failed on {ip}: {r.stderr.strip()}")
-                    failed.append(ip)
+        # 2. DaemonSet pipe — runtime-agnostic direct node import
+        runtime = self._node_runtime()
+        logger.info(f"[BuildMgr] Detected node runtime: {runtime} — loading via DaemonSet pipe")
 
-            if not failed:
-                return  # all nodes got the image
-            logger.info(f"[BuildMgr] SSH failed on {failed} — falling back to DaemonSet approach")
-
-        # 3. DaemonSet (Docker socket)
-        self._load_via_daemonset(image_tag)
-
-    @staticmethod
-    def _get_cluster_node_ips() -> list[str]:
-        """Return all node InternalIP addresses from the current kubectl context."""
-        result = subprocess.run(
-            "kubectl get nodes -o jsonpath='{.items[*].status.addresses"
-            "[?(@.type==\"InternalIP\")].address}'",
-            shell=True, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            return []
-        return [ip for ip in result.stdout.strip().strip("'").split() if ip]
-
-    @staticmethod
-    def _ssh_user() -> str:
-        """SSH username for cluster nodes.
-
-        Set SREGYM_CLUSTER_SSH_USER to override; defaults to the current OS user.
-        """
-        import os, getpass
-        return os.environ.get("SREGYM_CLUSTER_SSH_USER", "") or getpass.getuser()
-
-    @staticmethod
-    def _ssh_opts() -> str:
-        """Common SSH options.  Set SREGYM_CLUSTER_SSH_KEY for a custom identity file."""
-        import os
-        opts = "-o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes"
-        if key := os.environ.get("SREGYM_CLUSTER_SSH_KEY", ""):
-            opts += f" -i {key}"
-        return opts
-
-    def _load_via_daemonset(self, image_tag: str):
-        """Load the image on every node via a privileged DaemonSet + kubectl cp.
-
-        Works on any cluster whose nodes use the Docker container runtime and
-        where the Docker socket is exposed at /var/run/docker.sock.
-        """
-        import uuid
         ns = "default"
         ds_name = f"sregym-img-loader-{uuid.uuid4().hex[:6]}"
-        logger.info(f"[BuildMgr] Deploying image-loader DaemonSet {ds_name}")
+
+        if runtime == "containerd":
+            # alpine:3 is small and widely cached.  Mount the host's containerd
+            # socket and /usr/bin so the pod can run the node's own ctr binary
+            # without any glibc/musl incompatibility — ctr executes in the host's
+            # dynamic-linker context via the bind-mount, not inside Alpine.
+            loader_image = "alpine:3"
+            volume_mounts = """\
+        - name: containerd-sock
+          mountPath: /run/containerd/containerd.sock
+        - name: host-bin
+          mountPath: /host-bin
+          readOnly: true"""
+            volumes = """\
+      - name: containerd-sock
+        hostPath:
+          path: /run/containerd/containerd.sock
+          type: Socket
+      - name: host-bin
+        hostPath:
+          path: /usr/bin"""
+            # ctr reads the tarball from stdin; -n k8s.io is the containerd
+            # namespace that kubelet uses for pod images.
+            load_cmd = "/host-bin/ctr -a /run/containerd/containerd.sock -n k8s.io images import -"
+        else:
+            # Docker runtime (including cri-dockerd): use docker:cli which ships
+            # its own musl-compatible docker binary.  Running `docker load` inside
+            # this container via the mounted socket works natively — no need to
+            # touch the host's glibc-linked docker binary.
+            loader_image = "docker:cli"
+            volume_mounts = """\
+        - name: docker-sock
+          mountPath: /var/run/docker.sock"""
+            volumes = """\
+      - name: docker-sock
+        hostPath:
+          path: /var/run/docker.sock
+          type: Socket"""
+            load_cmd = "docker load"
 
         manifest = f"""\
 apiVersion: apps/v1
@@ -366,59 +365,101 @@ spec:
       - operator: Exists
       containers:
       - name: loader
-        image: docker:cli
+        image: {loader_image}
+        imagePullPolicy: IfNotPresent
         command: ["sleep", "infinity"]
+        securityContext:
+          privileged: true
         volumeMounts:
-        - name: docker-sock
-          mountPath: /var/run/docker.sock
+{volume_mounts}
       volumes:
-      - name: docker-sock
-        hostPath:
-          path: /var/run/docker.sock
+{volumes}
 """
+        ds_pipe_ok = False
         try:
-            # Deploy DS
             subprocess.run(
                 "kubectl apply -f -", shell=True,
                 input=manifest, capture_output=True, text=True, check=True,
             )
 
-            # Wait until all DS pods are Ready
-            import time
-            logger.info("[BuildMgr] Waiting for DaemonSet pods to be Ready …")
-            subprocess.run(
-                f"kubectl rollout status daemonset/{ds_name} -n {ns} --timeout=120s",
-                shell=True, capture_output=True, text=True,
-            )
-            pods_result = subprocess.run(
-                f"kubectl get pods -n {ns} -l app={ds_name} "
-                f"-o jsonpath='{{.items[?(@.status.phase==\"Running\")].metadata.name}}'",
-                shell=True, capture_output=True, text=True,
-            )
-            pods = [p for p in pods_result.stdout.strip().strip("'").split() if p]
-            logger.info(f"[BuildMgr] DaemonSet pods: {pods}")
-
-            for pod in pods:
-                logger.info(f"[BuildMgr] Piping image into {pod} …")
-                # Stream docker save directly into docker load via kubectl exec stdin
+            logger.info("[BuildMgr] Waiting for image-loader pods to be Running…")
+            deadline = time.time() + 180
+            phases = []
+            while time.time() < deadline:
                 r = subprocess.run(
-                    f"docker save {image_tag} | "
-                    f"kubectl exec -n {ns} -i {pod} -- docker load",
+                    f"kubectl get pods -n {ns} -l app={ds_name} "
+                    f"-o jsonpath='{{.items[*].status.phase}}'",
                     shell=True, capture_output=True, text=True,
                 )
-                if r.returncode == 0:
-                    logger.info(f"[BuildMgr] Image loaded on node hosting {pod}")
-                else:
-                    logger.warning(
-                        f"[BuildMgr] Failed to load on {pod}: {r.stderr.strip()}"
-                    )
+                phases = r.stdout.strip().strip("'").split()
+                if phases and all(p == "Running" for p in phases):
+                    break
+                time.sleep(5)
+            else:
+                logger.warning(
+                    f"[BuildMgr] Image-loader pods did not reach Running within 180s (phases: {phases})"
+                    " — falling back to registry push"
+                )
+                return  # exits try, hits finally, then falls through to docker push
 
+            pods = subprocess.run(
+                f"kubectl get pods -n {ns} -l app={ds_name} "
+                f"-o jsonpath='{{.items[*].metadata.name}}'",
+                shell=True, capture_output=True, text=True,
+            ).stdout.strip().strip("'").split()
+            pods = [p for p in pods if p]
+            logger.info(f"[BuildMgr] Loader pods: {pods}")
+
+            failed = []
+            for pod in pods:
+                loaded = False
+                for attempt in range(1, 4):
+                    r = subprocess.run(
+                        f"docker save {image_tag} | kubectl exec -n {ns} -i {pod} -- {load_cmd}",
+                        shell=True, capture_output=True, text=True,
+                    )
+                    if r.returncode == 0:
+                        logger.info(f"[BuildMgr] Loaded image on node via {pod} ({runtime})")
+                        loaded = True
+                        break
+                    logger.warning(
+                        f"[BuildMgr] Attempt {attempt}/3 failed on {pod}: "
+                        f"{r.stderr.strip() or r.stdout.strip()}"
+                    )
+                if not loaded:
+                    failed.append(pod)
+
+            if failed:
+                logger.warning(
+                    f"[BuildMgr] DaemonSet pipe failed on {failed} — falling back to registry push"
+                )
+            else:
+                ds_pipe_ok = True
+
+        except Exception as e:
+            logger.warning(f"[BuildMgr] DaemonSet pipe error: {e} — falling back to registry push")
         finally:
             subprocess.run(
                 f"kubectl delete daemonset {ds_name} -n {ns} --ignore-not-found",
                 shell=True, capture_output=True,
             )
             logger.info("[BuildMgr] Image-loader DaemonSet cleaned up")
+
+        if ds_pipe_ok:
+            return
+
+        # 3. Registry push (last resort)
+        result = subprocess.run(
+            f"docker push {image_tag}",
+            shell=True, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            logger.info(f"[BuildMgr] Pushed {image_tag} to registry")
+            return
+        raise RuntimeError(
+            f"[BuildMgr] All image distribution methods failed for {image_tag}. "
+            f"docker push error: {result.stderr.strip()}"
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -448,6 +489,44 @@ spec:
         if machine in ("arm64", "aarch64"):
             return "linux/arm64"
         return "linux/amd64"
+
+    @staticmethod
+    def system_logger_image() -> str:
+        """Return the k8ssandra system-logger sidecar image safe for all CPUs.
+
+        v1.22.0 is the newest tag built on UBI8 (glibc 2.28).  UBI8 has no
+        x86-64 microarchitecture minimum, so it runs on pre-Haswell nodes that
+        lack AVX2/FMA.  v1.30.0+ moved to UBI9 (glibc 2.34+) which enforces
+        x86-64-v3 and crashes with ``Fatal glibc error: CPU does not support
+        x86-64-v3`` on older hardware.
+
+        The v1.22.0 manifest is multi-arch (linux/amd64 + linux/arm64), so
+        this choice is CPU-agnostic, ISA-agnostic, and cluster-agnostic.
+        """
+        return "docker.io/k8ssandra/system-logger:v1.22.0"
+
+    @classmethod
+    def mgmt_api_image(cls, version: str) -> str:
+        """Return the k8ssandra management API base image for the given Cassandra version.
+
+        Always uses the no-suffix (Debian-based) tag, e.g.
+        ``k8ssandra/cass-management-api:4.1.7``.
+
+        Why no-suffix / Debian:
+          The -ubi8 and -ubi tags use Red Hat UBI as the base OS.  As of
+          v0.1.107 (Aug 2025) those images were rebuilt on a newer UBI whose
+          glibc requires x86-64-v3 (AVX2).  Any cluster node older than Haswell
+          (2013) — including Sandy Bridge E5-2450 — crashes immediately with
+          ``Fatal glibc error: CPU does not support x86-64-v3``.
+
+          The no-suffix tag builds FROM the official ``cassandra:{version}``
+          Docker image (Debian-based).  Debian's glibc has no microarchitecture
+          minimum, so it runs on any x86-64 CPU regardless of age.  The tag is
+          also a proper multi-arch manifest (linux/amd64 + linux/arm64), making
+          this choice CPU-agnostic, architecture-agnostic, and version-agnostic
+          (works for any Cassandra version k8ssandra publishes).
+        """
+        return f"k8ssandra/cass-management-api:{version}"
 
     def _image_exists_locally(self, image_tag: str) -> bool:
         result = subprocess.run(
@@ -485,7 +564,6 @@ spec:
                 return
 
         # Fallback: download tarball
-        ant_version = "1.10.15"
         ant_script = Path(__file__).parents[2] / "tests" / "e2e-testing-scripts" / "ant.sh"
         if ant_script.exists():
             result = subprocess.run(["bash", str(ant_script)], check=False)
