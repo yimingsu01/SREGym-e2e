@@ -180,6 +180,32 @@ Important:
 - You have access to kubectl commands to inspect and modify resources in namespace '{namespace}'
 - You can query metrics and traces through the available observability tools
 - The conductor API is available at {get_api_base_url()}
+
+## CODE-LEVEL BUG FIXES
+
+CRITICAL: Some issues are caused by bugs in application SOURCE CODE, not configuration.
+If you see OutOfMemoryError or crash loops, check for CODE BUGS BEFORE trying to increase
+heap size or change JVM options. Memory leaks in code will exhaust ANY amount of heap.
+
+Source code is mounted at: /opt/source
+
+To fix code-level bugs:
+1. Check if code fixes are available:
+   curl -s {get_api_base_url()}/cassandra/rebuild/status
+
+2. Examine the source code at /opt/source using Read/Grep tools
+   For Cassandra: /opt/source/src/java/org/apache/cassandra/...
+
+3. Edit the buggy code using the Edit tool (match exact whitespace)
+
+4. Rebuild and redeploy the application:
+   curl -X POST {get_api_base_url()}/cassandra/rebuild
+   This recompiles from source and performs a rolling restart (~12-15 minutes total)
+
+5. Wait for pods to become healthy, then submit your mitigation
+
+DO NOT skip to config changes (heap size, resource limits) without first checking
+if this is a code bug. The rebuild endpoint is the correct way to fix code issues.
 """
 
     logger.info(f"Built instruction:\n{instruction}")
