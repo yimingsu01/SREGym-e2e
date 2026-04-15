@@ -39,8 +39,8 @@ class AgentLauncher:
     def set_source_code_path(self, source_code_path: str | None):
         """
         Set the source code path to bind-mount into the agent container.
-        Used for code-level bug investigation (e.g. Cassandra source at a buggy commit).
-        Mounted read-only at /opt/source inside the container.
+        Used for code-level bug fixing (e.g. Cassandra source at a buggy commit).
+        Mounted read-write at /opt/source inside the container so agents can edit and rebuild.
         """
         self._source_code_path = source_code_path
 

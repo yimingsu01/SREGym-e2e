@@ -62,9 +62,7 @@ class CassandraBuildManager:
             raise FileNotFoundError(f"Java source root not found: {java_root}")
 
         source_hash = self._hash_dir(java_root)
-        versioned = hashlib.sha256(
-            f"{_DOCKERFILE_VERSION}:{source_hash}".encode()
-        ).hexdigest()
+        versioned = hashlib.sha256(f"{_DOCKERFILE_VERSION}:{source_hash}".encode()).hexdigest()
         image_tag = f"sregym/cassandra-patched:{self.cassandra_version}-{versioned[:8]}"
 
         if self._image_exists_locally(image_tag):
@@ -90,14 +88,12 @@ class CassandraBuildManager:
             raise FileNotFoundError(f"Patch directory not found: {patch_dir}")
 
         patch_hash = self._hash_dir(patch_dir)
-        versioned = hashlib.sha256(
-            f"{_DOCKERFILE_VERSION}:{patch_hash}".encode()
-        ).hexdigest()
+        versioned = hashlib.sha256(f"{_DOCKERFILE_VERSION}:{patch_hash}".encode()).hexdigest()
         image_tag = f"sregym/cassandra-patched:{self.cassandra_version}-{versioned[:8]}"
 
         if self._image_exists_locally(image_tag):
             logger.info(f"[BuildMgr] Cached image {image_tag} found — skipping build")
-            self._load_into_kind(image_tag)   # re-load in case cluster was recreated
+            self._load_into_kind(image_tag)  # re-load in case cluster was recreated
             return image_tag
 
         logger.info(f"[BuildMgr] Building custom Cassandra image {image_tag}")
@@ -136,6 +132,7 @@ class CassandraBuildManager:
             ).stderr  # java -version writes to stderr
             # First token like '23.0.1', '11.0.22', '1.8.0_392'
             import re
+
             m = re.search(r'"(\d+)(?:\.(\d+))?', out)
             if m:
                 major = int(m.group(1))
@@ -156,8 +153,7 @@ class CassandraBuildManager:
 
         if use_docker:
             logger.info(
-                f"[BuildMgr] System JDK {java_ver} is not JDK 11 — "
-                "compiling inside eclipse-temurin:11 Docker container"
+                f"[BuildMgr] System JDK {java_ver} is not JDK 11 — compiling inside eclipse-temurin:11 Docker container"
             )
             self._build_jar_in_docker()
         else:
@@ -199,9 +195,7 @@ class CassandraBuildManager:
         if result.returncode != 0:
             out = result.stdout[-3000:] if result.stdout else ""
             err = result.stderr[-3000:] if result.stderr else ""
-            raise RuntimeError(
-                f"Docker ant jar failed:\n--- stdout ---\n{out}\n--- stderr ---\n{err}"
-            )
+            raise RuntimeError(f"Docker ant jar failed:\n--- stdout ---\n{out}\n--- stderr ---\n{err}")
         logger.info("[BuildMgr] Docker ant jar succeeded")
 
     def _build_docker_image(self, image_tag: str):
@@ -211,17 +205,14 @@ class CassandraBuildManager:
 
         if not jar_src.exists():
             # Fallback: look for SNAPSHOT variant (built without -Dversion override)
-            candidates = sorted((self.source_path / "build").glob(
-                f"apache-cassandra-{self.cassandra_version}*.jar"
-            ))
+            candidates = sorted((self.source_path / "build").glob(f"apache-cassandra-{self.cassandra_version}*.jar"))
             if candidates:
                 jar_src = candidates[0]
                 jar_name = jar_src.name
                 logger.info(f"[BuildMgr] Using JAR: {jar_src.name}")
             else:
                 raise FileNotFoundError(
-                    f"Built JAR not found at {jar_src}. "
-                    "Make sure `ant jar` completed successfully."
+                    f"Built JAR not found at {jar_src}. Make sure `ant jar` completed successfully."
                 )
 
         build_ctx = Path(tempfile.mkdtemp(prefix="sregym-cassandra-docker-"))
@@ -229,16 +220,18 @@ class CassandraBuildManager:
             # Always install as the canonical name so it replaces the base image's JAR.
             canonical_jar = f"apache-cassandra-{self.cassandra_version}.jar"
             shutil.copy2(jar_src, build_ctx / canonical_jar)
-            dockerfile = "\n".join([
-                f"FROM {self.base_image}",
-                "USER root",
-                f"COPY {canonical_jar} {_CASSANDRA_LIB_DIR}/{canonical_jar}",
-                # No-argument helper script for -XX:OnOutOfMemoryError (avoids spaces in JVM flag)
-                r"RUN printf '#!/bin/sh\nkill -9 1\n' > /usr/local/bin/oom-kill-mgmt.sh && chmod +x /usr/local/bin/oom-kill-mgmt.sh",
-                # Comment out the default OOM handler in cassandra-env.sh so our custom handler
-                # (set via additionalJvm11ServerOptions) is not overridden
-                r"RUN sed -i 's/^JVM_ON_OUT_OF_MEMORY_ERROR_OPT=/#JVM_ON_OUT_OF_MEMORY_ERROR_OPT=/' /opt/cassandra/conf/cassandra-env.sh",
-            ])
+            dockerfile = "\n".join(
+                [
+                    f"FROM {self.base_image}",
+                    "USER root",
+                    f"COPY {canonical_jar} {_CASSANDRA_LIB_DIR}/{canonical_jar}",
+                    # No-argument helper script for -XX:OnOutOfMemoryError (avoids spaces in JVM flag)
+                    r"RUN printf '#!/bin/sh\nkill -9 1\n' > /usr/local/bin/oom-kill-mgmt.sh && chmod +x /usr/local/bin/oom-kill-mgmt.sh",
+                    # Comment out the default OOM handler in cassandra-env.sh so our custom handler
+                    # (set via additionalJvm11ServerOptions) is not overridden
+                    r"RUN sed -i 's/^JVM_ON_OUT_OF_MEMORY_ERROR_OPT=/#JVM_ON_OUT_OF_MEMORY_ERROR_OPT=/' /opt/cassandra/conf/cassandra-env.sh",
+                ]
+            )
             (build_ctx / "Dockerfile").write_text(dockerfile)
 
             platform = self._cluster_platform()
@@ -251,9 +244,7 @@ class CassandraBuildManager:
                 text=True,
             )
             if result.returncode != 0:
-                raise RuntimeError(
-                    f"docker buildx build failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-                )
+                raise RuntimeError(f"docker buildx build failed:\nstdout: {result.stdout}\nstderr: {result.stderr}")
             logger.info(f"[BuildMgr] Docker image {image_tag} built")
         finally:
             shutil.rmtree(build_ctx, ignore_errors=True)
@@ -272,10 +263,15 @@ class CassandraBuildManager:
                            Docker-runtime cluster without SSH access
         """
         # 1. kind
-        if subprocess.run(
-            f"kind load docker-image {image_tag}",
-            shell=True, capture_output=True, text=True,
-        ).returncode == 0:
+        if (
+            subprocess.run(
+                f"kind load docker-image {image_tag}",
+                shell=True,
+                capture_output=True,
+                text=True,
+            ).returncode
+            == 0
+        ):
             logger.info(f"[BuildMgr] Loaded {image_tag} into kind cluster")
             return
 
@@ -284,15 +280,11 @@ class CassandraBuildManager:
         if node_ips:
             ssh_user = self._ssh_user()
             ssh_opts = self._ssh_opts()
-            logger.info(
-                f"[BuildMgr] Distributing {image_tag} to {len(node_ips)} node(s) "
-                f"as {ssh_user} via SSH"
-            )
+            logger.info(f"[BuildMgr] Distributing {image_tag} to {len(node_ips)} node(s) as {ssh_user} via SSH")
             failed = []
             for ip in node_ips:
                 cmd = (
-                    f"docker save {image_tag} | gzip | "
-                    f"ssh {ssh_opts} {ssh_user}@{ip} 'sudo docker load || docker load'"
+                    f"docker save {image_tag} | gzip | ssh {ssh_opts} {ssh_user}@{ip} 'sudo docker load || docker load'"
                 )
                 logger.info(f"[BuildMgr] → pushing to {ip} …")
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
@@ -313,9 +305,10 @@ class CassandraBuildManager:
     def _get_cluster_node_ips() -> list[str]:
         """Return all node InternalIP addresses from the current kubectl context."""
         result = subprocess.run(
-            "kubectl get nodes -o jsonpath='{.items[*].status.addresses"
-            "[?(@.type==\"InternalIP\")].address}'",
-            shell=True, capture_output=True, text=True,
+            "kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type==\"InternalIP\")].address}'",
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             return []
@@ -327,13 +320,16 @@ class CassandraBuildManager:
 
         Set SREGYM_CLUSTER_SSH_USER to override; defaults to the current OS user.
         """
-        import os, getpass
+        import getpass
+        import os
+
         return os.environ.get("SREGYM_CLUSTER_SSH_USER", "") or getpass.getuser()
 
     @staticmethod
     def _ssh_opts() -> str:
         """Common SSH options.  Set SREGYM_CLUSTER_SSH_KEY for a custom identity file."""
         import os
+
         opts = "-o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes"
         if key := os.environ.get("SREGYM_CLUSTER_SSH_KEY", ""):
             opts += f" -i {key}"
@@ -346,6 +342,7 @@ class CassandraBuildManager:
         where the Docker socket is exposed at /var/run/docker.sock.
         """
         import uuid
+
         ns = "default"
         ds_name = f"sregym-img-loader-{uuid.uuid4().hex[:6]}"
         logger.info(f"[BuildMgr] Deploying image-loader DaemonSet {ds_name}")
@@ -382,21 +379,28 @@ spec:
         try:
             # Deploy DS
             subprocess.run(
-                "kubectl apply -f -", shell=True,
-                input=manifest, capture_output=True, text=True, check=True,
+                "kubectl apply -f -",
+                shell=True,
+                input=manifest,
+                capture_output=True,
+                text=True,
+                check=True,
             )
 
             # Wait until all DS pods are Ready
-            import time
             logger.info("[BuildMgr] Waiting for DaemonSet pods to be Ready …")
             subprocess.run(
                 f"kubectl rollout status daemonset/{ds_name} -n {ns} --timeout=120s",
-                shell=True, capture_output=True, text=True,
+                shell=True,
+                capture_output=True,
+                text=True,
             )
             pods_result = subprocess.run(
                 f"kubectl get pods -n {ns} -l app={ds_name} "
                 f"-o jsonpath='{{.items[?(@.status.phase==\"Running\")].metadata.name}}'",
-                shell=True, capture_output=True, text=True,
+                shell=True,
+                capture_output=True,
+                text=True,
             )
             pods = [p for p in pods_result.stdout.strip().strip("'").split() if p]
             logger.info(f"[BuildMgr] DaemonSet pods: {pods}")
@@ -405,21 +409,21 @@ spec:
                 logger.info(f"[BuildMgr] Piping image into {pod} …")
                 # Stream docker save directly into docker load via kubectl exec stdin
                 r = subprocess.run(
-                    f"docker save {image_tag} | "
-                    f"kubectl exec -n {ns} -i {pod} -- docker load",
-                    shell=True, capture_output=True, text=True,
+                    f"docker save {image_tag} | kubectl exec -n {ns} -i {pod} -- docker load",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
                 )
                 if r.returncode == 0:
                     logger.info(f"[BuildMgr] Image loaded on node hosting {pod}")
                 else:
-                    logger.warning(
-                        f"[BuildMgr] Failed to load on {pod}: {r.stderr.strip()}"
-                    )
+                    logger.warning(f"[BuildMgr] Failed to load on {pod}: {r.stderr.strip()}")
 
         finally:
             subprocess.run(
                 f"kubectl delete daemonset {ds_name} -n {ns} --ignore-not-found",
-                shell=True, capture_output=True,
+                shell=True,
+                capture_output=True,
             )
             logger.info("[BuildMgr] Image-loader DaemonSet cleaned up")
 
@@ -436,10 +440,14 @@ spec:
         Falls back to the host's native platform if kubectl isn't available.
         """
         import platform as _platform
+
         try:
             result = subprocess.run(
                 "kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}'",
-                shell=True, capture_output=True, text=True, timeout=10,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             arch = result.stdout.strip().strip("'")  # 'amd64' or 'arm64'
             if arch:
@@ -455,7 +463,8 @@ spec:
     def _image_exists_locally(self, image_tag: str) -> bool:
         result = subprocess.run(
             f"docker image inspect {image_tag}",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
         return result.returncode == 0
 

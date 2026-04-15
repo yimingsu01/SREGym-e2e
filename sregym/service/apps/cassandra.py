@@ -79,7 +79,9 @@ class Cassandra(Application):
         """Install cert-manager if not already present (required by K8ssandra webhooks)."""
         result = subprocess.run(
             "kubectl get namespace cert-manager --ignore-not-found",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         if "cert-manager" in result.stdout:
             logger.info("cert-manager already installed")
@@ -107,7 +109,9 @@ class Cassandra(Application):
         # Check if already installed
         existing = subprocess.run(
             f"helm status k8ssandra-operator -n {self.operator_namespace}",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         if existing.returncode == 0:
             if "deployed" in existing.stdout:
@@ -117,7 +121,8 @@ class Cassandra(Application):
                 logger.warning("K8ssandra operator release is in 'failed' state — uninstalling before reinstall")
                 subprocess.run(
                     f"helm uninstall k8ssandra-operator -n {self.operator_namespace}",
-                    shell=True, check=False,
+                    shell=True,
+                    check=False,
                 )
 
         logger.info("Running helm upgrade --install for k8ssandra-operator...")
@@ -148,9 +153,7 @@ class Cassandra(Application):
         """Deploy the K8ssandraCluster CR using kubectl apply via stdin."""
         logger.info(f"Deploying Cassandra cluster '{self.cluster_name}' with {self.cluster_size} nodes")
 
-        _run(
-            f"kubectl create namespace {self.namespace} --dry-run=client -o yaml | kubectl apply -f -"
-        )
+        _run(f"kubectl create namespace {self.namespace} --dry-run=client -o yaml | kubectl apply -f -")
 
         manifest = self._build_cluster_manifest()
         _run("kubectl apply -f -", input=manifest)
@@ -207,13 +210,11 @@ spec:
             result = subprocess.run(
                 f"kubectl get cassandradatacenter {self.datacenter_name} -n {self.namespace} "
                 f"-o jsonpath='{{range .status.conditions[*]}}{{.type}}={{.status}}\\n{{end}}'",
-                shell=True, capture_output=True, text=True,
+                shell=True,
+                capture_output=True,
+                text=True,
             )
-            conditions = dict(
-                line.split("=", 1)
-                for line in result.stdout.strip().split("\\n")
-                if "=" in line
-            )
+            conditions = dict(line.split("=", 1) for line in result.stdout.strip().split("\\n") if "=" in line)
             if conditions.get("Ready") == "True":
                 logger.info("CassandraDatacenter Ready=True — superuser created, cluster fully ready")
                 return
@@ -225,14 +226,19 @@ spec:
     def _get_cql_credentials(self) -> tuple[str, str]:
         """Retrieve the superuser credentials from the K8ssandra-managed secret."""
         import base64
+
         secret_name = f"{self.cluster_name}-superuser"
         username = subprocess.run(
             f"kubectl get secret {secret_name} -n {self.namespace} -o jsonpath='{{.data.username}}'",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
         password = subprocess.run(
             f"kubectl get secret {secret_name} -n {self.namespace} -o jsonpath='{{.data.password}}'",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
         return base64.b64decode(username).decode(), base64.b64decode(password).decode()
 
@@ -246,11 +252,17 @@ spec:
         """
         import base64 as _b64
 
-        pod = subprocess.run(
-            f"kubectl get pods -n {self.namespace} -l app.kubernetes.io/name=cassandra "
-            f"-o jsonpath='{{.items[0].metadata.name}}'",
-            shell=True, capture_output=True, text=True,
-        ).stdout.strip().strip("'")
+        pod = (
+            subprocess.run(
+                f"kubectl get pods -n {self.namespace} -l app.kubernetes.io/name=cassandra "
+                f"-o jsonpath='{{.items[0].metadata.name}}'",
+                shell=True,
+                capture_output=True,
+                text=True,
+            )
+            .stdout.strip()
+            .strip("'")
+        )
 
         if not pod:
             raise RuntimeError(f"No Cassandra pods found in namespace '{self.namespace}'")
@@ -264,9 +276,12 @@ spec:
             f"bash -c '"
             f"U=$(echo {u_b64} | base64 -d); "
             f"P=$(echo {p_b64} | base64 -d); "
-            f"cqlsh -u \"$U\" -p \"$P\" --request-timeout=30"
+            f'cqlsh -u "$U" -p "$P" --request-timeout=30'
             f"'",
-            shell=True, capture_output=True, text=True, input=cql,
+            shell=True,
+            capture_output=True,
+            text=True,
+            input=cql,
         )
         logger.info(f"CQL stdout: {result.stdout}")
         if result.stderr:
@@ -283,12 +298,10 @@ spec:
         K8ssandra performs a rolling restart so pods pick up the new image.
         """
         import json as _json
+
         patch = _json.dumps({"spec": {"cassandra": {"serverImage": new_image}}})
         logger.info(f"Patching K8ssandraCluster to use image: {new_image}")
-        _run(
-            f"kubectl patch k8ssandracluster {self.cluster_name} -n {self.namespace} "
-            f"--type=merge -p '{patch}'"
-        )
+        _run(f"kubectl patch k8ssandracluster {self.cluster_name} -n {self.namespace} --type=merge -p '{patch}'")
         logger.info("Image patched — waiting for rolling restart to complete")
         self._wait_for_cluster_ready()
         logger.info(f"Cluster ready with new image: {new_image}")
@@ -297,7 +310,8 @@ spec:
         """Delete the Cassandra cluster CR."""
         subprocess.run(
             f"kubectl delete k8ssandracluster {self.cluster_name} -n {self.namespace} --ignore-not-found",
-            shell=True, check=False,
+            shell=True,
+            check=False,
         )
 
     def cleanup(self):
@@ -311,20 +325,24 @@ spec:
         # Clean up any leftover PVs bound to this namespace
         pvs_out = subprocess.run(
             f"kubectl get pv --no-headers | grep '{self.namespace}' || true",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         ).stdout
         for line in pvs_out.strip().splitlines():
             if line:
                 pv_name = line.split()[0]
                 subprocess.run(
-                    f"kubectl patch pv {pv_name} -p '{{\"metadata\":{{\"finalizers\":null}}}}'",
-                    shell=True, check=False,
+                    f'kubectl patch pv {pv_name} -p \'{{"metadata":{{"finalizers":null}}}}\'',
+                    shell=True,
+                    check=False,
                 )
                 subprocess.run(f"kubectl delete pv {pv_name} --ignore-not-found", shell=True, check=False)
 
         subprocess.run(
             f"helm uninstall k8ssandra-operator -n {self.operator_namespace} 2>/dev/null || true",
-            shell=True, check=False,
+            shell=True,
+            check=False,
         )
         self.kubectl.delete_namespace(self.operator_namespace)
 

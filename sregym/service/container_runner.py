@@ -29,7 +29,7 @@ class ContainerConfig:
     logs_path: Path | None = None
     sregym_apps_path: Path | None = None
     sregym_app_subdirs: list[str] | None = None
-    source_code_path: Path | None = None  # bind-mounted to /opt/source:ro for code-level bug investigation
+    source_code_path: Path | None = None  # bind-mounted to /opt/source:rw for code-level bug fixing
     env_vars: dict = field(default_factory=dict)
     cpus: float = 4.0
     memory: str = "8g"
@@ -228,9 +228,9 @@ class ContainerRunner:
                 if host_path.exists():
                     args.extend(["-v", f"{host_path.resolve()}:/opt/sregym/SREGym-applications/{subdir}:ro"])
 
-        # Mount source code for code-level bug investigation
+        # Mount source code for code-level bug investigation (read-write for code fixes)
         if self.config.source_code_path and self.config.source_code_path.exists():
-            args.extend(["-v", f"{self.config.source_code_path.resolve()}:/opt/source"])
+            args.extend(["-v", f"{self.config.source_code_path.resolve()}:/opt/source:rw"])
 
         return args
 
