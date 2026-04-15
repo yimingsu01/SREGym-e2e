@@ -1,19 +1,22 @@
 """Cassandra OOM: unbounded diagnostic buffer in ReadCommand causes heap exhaustion.
 
-Bug: ReadCommand.executeLocally() allocates a 256 KB byte array into a static
-     List<byte[]> (queryDiagnosticBuffer) on every local read.  The list has no
-     eviction policy, so it grows without bound.  Under any sustained read workload
-     the JVM heap fills up and Cassandra crashes with:
+Bug: ReadCommand.executeLocally() allocates a 1 MB byte array into a static
+     List<byte[]> (queryDiagnosticBuffer) on EVERY local read.  The list has no
+     eviction policy, so it grows without bound.  Even during normal startup,
+     Cassandra performs internal reads (system tables, schema, gossip) which
+     trigger the allocation.  The JVM heap fills up and crashes with:
 
          java.lang.OutOfMemoryError: Java heap space
 
-     Kubernetes OOMKills the container and restarts it.  The workload pod is still
-     running, so reads resume immediately — the heap fills again within seconds —
-     and the restart loop escalates to CrashLoopBackOff.
+     The bug logs warnings every 10 reads showing buffer growth:
+         WARN - queryDiagnosticBuffer size: 10 entries (~10MB held)
+
+     Kubernetes restarts the container, but internal reads immediately resume,
+     the heap fills again, and the node enters CrashLoopBackOff.
 
 Root cause: ReadCommand.java — a diagnostic snapshot buffer accumulated in a
      static field was never removed before the release build.  The allocation
-     (262,144 bytes × every local read) is the sole source of heap growth; no
+     (1,048,576 bytes × every local read) is the sole source of heap growth; no
      other change to Cassandra is needed to reproduce the crash.
 
 Fix: remove the queryDiagnosticBuffer field and its single call-site in
@@ -93,9 +96,10 @@ spec:
             cpu: "1"
         config:
           jvmOptions:
-            heapSize: 256M
+            heapSize: 64M
             additionalJvm11ServerOptions:
               - "-XX:OnOutOfMemoryError=/usr/local/bin/oom-kill-mgmt.sh"
+              - "-XX:+HeapDumpOnOutOfMemoryError"
 """
 
 
@@ -103,18 +107,21 @@ class CassandraOomRead(CassandraCustomBuildProblem):
     """Cassandra crashes with OOM due to unbounded static diagnostic buffer in read path.
 
     Fault injection:
-      1. Deploys Cassandra 4.1.7 built from a patched source where
-         ReadCommand.executeLocally() accumulates 256 KB per read into a
-         static List<byte[]> that is never cleared.
-      2. Seeds the table with 20 rows.
-      3. Deploys a reader Deployment that issues full-table scans in a tight
-         loop.  Each scan executes 20 local reads → 5 MB of heap growth per
-         loop iteration.  With a 512 MB JVM heap the node OOMs in under a
-         minute, is OOMKilled by Kubernetes, restarts, and immediately OOMs
-         again → CrashLoopBackOff.
+      Deploys Cassandra 4.1.7 built from a patched source where
+      ReadCommand.executeLocally() accumulates 1 MB per read into a
+      static List<byte[]> that is never cleared.
 
-    The agent observes OOMKilled Cassandra pods, finds OutOfMemoryError in the
-    logs, and must locate the rogue static buffer in ReadCommand.java.
+      The bug triggers on ALL reads, including internal system reads during
+      startup (schema, gossip, etc.).  No external workload is needed — the
+      cluster OOMs shortly after deploy.
+
+    Observable symptoms:
+      - Cassandra logs show buffer growth warnings every 10 reads:
+          WARN - queryDiagnosticBuffer size: 10 entries (~10MB held)
+      - Eventually: java.lang.OutOfMemoryError: Java heap space
+      - Pods restart and immediately OOM again → CrashLoopBackOff
+
+    The agent must locate the rogue static buffer in ReadCommand.java.
     """
 
     cassandra_version = "4.1.7"
@@ -123,15 +130,15 @@ class CassandraOomRead(CassandraCustomBuildProblem):
 
     root_cause_file = "src/java/org/apache/cassandra/db/ReadCommand.java"
     root_cause_description = (
-        "ReadCommand.executeLocally() (ReadCommand.java) allocates a 256 KB byte "
+        "ReadCommand.executeLocally() (ReadCommand.java) allocates a 1 MB byte "
         "array into a static, unbounded List<byte[]> (queryDiagnosticBuffer) on "
-        "every local read execution.  The list has no maximum size and is never "
-        "cleared, so heap usage grows monotonically with query volume.  Under any "
-        "sustained read workload the JVM exhausts its heap and crashes with "
-        "OutOfMemoryError: Java heap space.  Kubernetes OOMKills the pod and "
-        "restarts it; the workload immediately resumes reads, the heap fills again, "
-        "and the node enters CrashLoopBackOff.  Fix: remove the queryDiagnosticBuffer "
-        "field and its allocation in executeLocally()."
+        "EVERY local read execution, including internal system reads during startup.  "
+        "The list has no maximum size and is never cleared.  Even without external "
+        "workload, normal startup reads (schema, gossip, system tables) exhaust the "
+        "heap and crash with OutOfMemoryError.  Logs show warnings before OOM: "
+        "'queryDiagnosticBuffer size: N entries (~NMB held)'.  Kubernetes restarts "
+        "the pod; it OOMs again immediately → CrashLoopBackOff.  Fix: remove the "
+        "queryDiagnosticBuffer field and its allocation in executeLocally()."
     )
 
     trigger_cql = _SETUP_CQL
@@ -144,12 +151,16 @@ class CassandraOomRead(CassandraCustomBuildProblem):
 
     @mark_fault_injected
     def inject_fault(self):
-        logger.info("[CassandraOomRead] Setting up bench keyspace and seeding rows")
-        self.app.run_cql(_SETUP_CQL)
-        self.app.run_cql(_SEED_CQL)
-
-        logger.info("[CassandraOomRead] Deploying read-loop workload — will OOM Cassandra nodes")
-        self._deploy_reader()
+        # The fault is already active: the patched ReadCommand.java allocates
+        # 256KB on EVERY read, including internal system reads during startup.
+        # Cassandra will OOM shortly after deploy without any external workload.
+        #
+        # Logs will show buffer growth warnings before OOM:
+        #   WARN - queryDiagnosticBuffer size: 100 entries (~25MB held)
+        #   WARN - queryDiagnosticBuffer size: 200 entries (~51MB held)
+        #   ...
+        #   java.lang.OutOfMemoryError: Java heap space
+        logger.info("[CassandraOomRead] Fault already active — OOM will occur from internal reads during startup")
 
     def _deploy_reader(self):
         cass_host = (

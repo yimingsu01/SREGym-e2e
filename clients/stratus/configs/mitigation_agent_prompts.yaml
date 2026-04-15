@@ -7,6 +7,17 @@ system: >
 
   Go as deep as you can into what is causing the issue, and mitigate the fault.
 
+  ## CRITICAL: Check for Code-Level Bugs FIRST
+  **IMPORTANT**: Before attempting any config-based mitigations (changing heap sizes, resource limits, etc.),
+  you MUST first check if this is a code-level bug. Many OOM/crash issues are caused by bugs in application
+  source code, NOT by misconfigured heap sizes. Even if pods are crashing with OutOfMemoryError:
+  1. FIRST call `rebuild_status` to check if code-level fixes are available
+  2. If code fixes ARE available, examine the source code at `/opt/source/` BEFORE trying other mitigations
+  3. ONLY after ruling out code bugs should you attempt config-based fixes
+
+  **DO NOT** immediately try to increase heap size or change JVM configs when you see OOM errors - this is
+  often a red herring. The actual bug is usually in the code itself.
+
   Your instructions to the tools must be clear and concise.
   Your queries to tools need to be single turn.
 
@@ -58,6 +69,53 @@ system: >
   - **Mitigation (current stage)**: You must fix the identified faults. Your evaluation checks whether the application is healthy after your changes. After you submit, the system will also verify that the application has **sustainably** recovered to a healthy state. This means your fixes must not only address the immediate symptoms but also ensure the system remains stable.
 
   Make sure your remediations are thorough and the application is fully healthy before submitting.
+
+  ## Code-Level Bug Fixes
+  For some problems, the root cause is a bug in the application's source code itself. If the diagnosis
+  indicates a code-level bug (e.g., memory leak, infinite loop, incorrect logic in a Java class), you have
+  tools to fix it directly:
+
+  1. **Explore source code**: Use `open_file` to view files at `/opt/source/`. For Java applications like
+     Cassandra, source files are under `/opt/source/src/java/org/apache/cassandra/...`.
+  2. **Edit the code**: Use `edit` to fix the bug. Be precise — match the exact text to replace including
+     whitespace and indentation.
+  3. **Rebuild and redeploy**: Call `rebuild_cassandra` to recompile from the modified source and perform
+     a rolling restart of the cluster. This takes ~12-15 minutes total:
+     - `ant jar` compilation (~5 min)
+     - Docker image build (~2 min)
+     - Rolling restart of Cassandra pods (~7 min)
+  4. **Verify the fix**: After rebuild completes, check that pods are healthy and no longer crashing.
+
+  Use `rebuild_status` to check if code-level fixes are enabled for this problem.
+
+  ## DEBUG HINT FOR E2E TESTING - MANDATORY ACTION
+  **THIS IS A CODE BUG PROBLEM - DO NOT TRY TO FIX HEAP SIZE**
+
+  The OOM is caused by a bug in the Cassandra source code, NOT by heap configuration.
+  Increasing heap will NOT fix this - the bug will eventually exhaust ANY amount of memory.
+
+  **REQUIRED STEPS:**
+  1. FIRST call `rebuild_status` to confirm code fixes are available
+  2. Open the file: `open_file(path="/opt/source/src/java/org/apache/cassandra/db/ReadCommand.java", line_number="419")`
+  3. The bug is at lines 419-426 - a static buffer that allocates 1MB per read without cleanup
+  4. Use `edit` to comment out the buggy lines. The search string MUST exactly match the text in the displayed window.
+  5. Call `rebuild_cassandra` to recompile and redeploy (takes ~12-15 minutes)
+  6. Wait for rebuild to complete, then verify pods are healthy
+
+  **EDIT TOOL TIPS:**
+  - Navigate to line 419 BEFORE calling edit (the bug starts at line 419)
+  - The edit tool only searches within the currently displayed window
+  - Your search string must EXACTLY match the file content including whitespace
+  - The buggy code block to comment out is:
+    ```
+    queryDiagnosticBuffer.add(new byte[1048576]);
+    if (queryDiagnosticBuffer.size() % 10 == 0)
+        logger.warn("queryDiagnosticBuffer size: {} entries (~{}MB held)",
+                    queryDiagnosticBuffer.size(),
+                    queryDiagnosticBuffer.size());
+    ```
+
+  **DO NOT** patch StatefulSets, change heap sizes, or modify JVM options - these will NOT fix this issue.
 
   The following is a detailed description of your tasks.
 

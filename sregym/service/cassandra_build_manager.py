@@ -35,7 +35,7 @@ _MGMT_API_BASE = "k8ssandra/cass-management-api:{version}-ubi8"
 _CASSANDRA_LIB_DIR = "/opt/cassandra/lib"
 
 # Bump this to invalidate all cached images when the Dockerfile template changes.
-_DOCKERFILE_VERSION = "v2"
+_DOCKERFILE_VERSION = "v3"
 
 
 class CassandraBuildManager:
@@ -235,6 +235,9 @@ class CassandraBuildManager:
                 f"COPY {canonical_jar} {_CASSANDRA_LIB_DIR}/{canonical_jar}",
                 # No-argument helper script for -XX:OnOutOfMemoryError (avoids spaces in JVM flag)
                 r"RUN printf '#!/bin/sh\nkill -9 1\n' > /usr/local/bin/oom-kill-mgmt.sh && chmod +x /usr/local/bin/oom-kill-mgmt.sh",
+                # Comment out the default OOM handler in cassandra-env.sh so our custom handler
+                # (set via additionalJvm11ServerOptions) is not overridden
+                r"RUN sed -i 's/^JVM_ON_OUT_OF_MEMORY_ERROR_OPT=/#JVM_ON_OUT_OF_MEMORY_ERROR_OPT=/' /opt/cassandra/conf/cassandra-env.sh",
             ])
             (build_ctx / "Dockerfile").write_text(dockerfile)
 

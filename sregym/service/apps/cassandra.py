@@ -70,9 +70,10 @@ class Cassandra(Application):
         self._ensure_cert_manager()
         self._install_operator()
         self._deploy_cassandra_cluster()
-        self._wait_for_cluster_ready()
+        # Skip waiting - let the cluster come up asynchronously
+        # self._wait_for_cluster_ready()
 
-        logger.info("Cassandra cluster deployed and ready")
+        logger.info("Cassandra cluster deployed (not waiting for ready)")
 
     def _ensure_cert_manager(self):
         """Install cert-manager if not already present (required by K8ssandra webhooks)."""
@@ -199,8 +200,8 @@ spec:
         that step completes. Pod readiness (2/2) fires several minutes earlier and is
         not a sufficient signal — waiting for it causes auth failures.
         """
-        logger.info(f"Waiting for CassandraDatacenter '{self.datacenter_name}' Ready condition (up to 20 min)...")
-        deadline = time.time() + 1200
+        logger.info(f"Waiting for CassandraDatacenter '{self.datacenter_name}' Ready condition (up to 7 min)...")
+        deadline = time.time() + 420
 
         while time.time() < deadline:
             result = subprocess.run(

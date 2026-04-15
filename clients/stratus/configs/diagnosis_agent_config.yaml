@@ -1,5 +1,5 @@
 # each step is defined as one tool call
-max_step: 20
+max_step: 50
 # diagnosis agent has no synchronous tools
 sync_tools: null
 async_tools:

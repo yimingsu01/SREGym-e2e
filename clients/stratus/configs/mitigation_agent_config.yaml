@@ -1,6 +1,6 @@
 # each step is defined as one tool call
-max_step: 20
-max_retry_attempts: 10
+max_step: 50
+max_retry_attempts: 2
 # choose from: naive, validate, none
 retry_mode: validate
 sync_tools:
@@ -13,6 +13,36 @@ sync_tools:
 
           Args:
               seconds (int): Number of seconds to wait.
+  # File editing tools for code-level bug fixing
+  - name: open_file
+    description: |
+      Open a file for viewing and editing. You must open a file before using edit or insert.
+
+          Args:
+              path (str): Absolute path to the file (e.g., /opt/source/src/java/MyClass.java)
+              line_number (str): Optional line number to start viewing from (default: 1)
+  - name: goto_line
+    description: |
+      Navigate to a specific line in the currently opened file.
+
+          Args:
+              line_number (int): The line number to navigate to (1-indexed)
+  - name: edit
+    description: |
+      Replace text in the currently opened file. Searches for the first occurrence of the
+          search string in the displayed window and replaces it with the replace string.
+
+          Args:
+              search (str): The text to search for (include exact whitespace/indentation)
+              replace (str): The text to replace it with
+              replace_all (bool): If True, replace all occurrences in the file (default: False)
+  - name: insert
+    description: |
+      Insert text into the currently opened file at a specific line or at the end.
+
+          Args:
+              text (str): The text to insert
+              line_number (int): Optional line number to insert after (default: end of file)
 async_tools:
   - name: get_traces
     description: |
@@ -69,4 +99,23 @@ async_tools:
 
           Args:
               ans (str): the answer you would like to submit to the benchmark
+  # Cassandra rebuild tools for code-level bug fixing
+  - name: rebuild_cassandra
+    description: |
+      Rebuild Cassandra from modified source code. After editing files under /opt/source,
+          call this tool to recompile and redeploy. Takes ~12-15 minutes total:
+          - Compile with 'ant jar' (~5 minutes)
+          - Build Docker image
+          - Rolling restart cluster (~7 minutes)
+
+          Args: None
+
+          Returns: {"status": "deployed", "image": "<tag>"} on success
+  - name: rebuild_status
+    description: |
+      Check if Cassandra rebuild is available for this problem.
+
+          Args: None
+
+          Returns: {"ready": bool, "allows_rebuild": bool, "has_source": bool, "has_cassandra": bool}
 prompts_path: mitigation_agent_prompts.yaml

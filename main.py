@@ -345,9 +345,49 @@ def _run_driver_and_shutdown(
         request_shutdown()
 
 
+def _ensure_kind_cluster():
+    """Ensure a kind cluster exists, creating one if necessary."""
+    import subprocess
+    import platform
+
+    result = subprocess.run(
+        "kind get clusters",
+        shell=True, capture_output=True, text=True,
+    )
+    if "kind" in result.stdout:
+        logger.info("✅ Kind cluster already exists")
+        return
+
+    logger.info("🔧 No kind cluster found — creating one...")
+
+    # Select config based on architecture
+    arch = platform.machine()
+    if arch in ("x86_64", "amd64"):
+        config_file = Path(__file__).parent / "kind" / "kind-config-x86.yaml"
+    else:
+        config_file = Path(__file__).parent / "kind" / "kind-config.yaml"
+
+    if not config_file.exists():
+        logger.error(f"❌ Kind config not found: {config_file}")
+        sys.exit(1)
+
+    result = subprocess.run(
+        f"kind create cluster --config {config_file}",
+        shell=True, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        logger.error(f"❌ Failed to create kind cluster: {result.stderr}")
+        sys.exit(1)
+
+    logger.info("✅ Kind cluster created successfully")
+
+
 def main(args):
     # set up the logger
     init_logger()
+
+    # Ensure kind cluster exists
+    _ensure_kind_cluster()
 
     agent_model = args.model
     judge_model = args.judge_model or args.model

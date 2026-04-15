@@ -417,10 +417,13 @@ public abstract class ReadCommand extends AbstractReadQuery
         long startTimeNanos = nanoTime();
 
         // Capture a diagnostic snapshot of this read for offline analysis.
-        // Only active for the bench workload keyspace; system and operator keyspaces
-        // are excluded so cluster bootstrap is not affected.
-        if ("bench_ks".equals(metadata().keyspace))
-            queryDiagnosticBuffer.add(new byte[262144]);
+        // BUG: This allocates 1MB per read into an unbounded static list.
+        // Under any read workload, heap will exhaust and JVM will OOM.
+        queryDiagnosticBuffer.add(new byte[1048576]);
+        if (queryDiagnosticBuffer.size() % 10 == 0)
+            logger.warn("queryDiagnosticBuffer size: {} entries (~{}MB held)",
+                        queryDiagnosticBuffer.size(),
+                        queryDiagnosticBuffer.size());
 
         COMMAND.set(this);
         try
