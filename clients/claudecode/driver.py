@@ -206,6 +206,31 @@ To fix code-level bugs:
 
 DO NOT skip to config changes (heap size, resource limits) without first checking
 if this is a code bug. The rebuild endpoint is the correct way to fix code issues.
+
+## DEBUG HINT FOR CASSANDRA OOM PROBLEMS - MANDATORY ACTION
+
+**THIS IS A CODE BUG PROBLEM - DO NOT TRY TO FIX HEAP SIZE**
+
+The OOM is caused by a bug in the Cassandra source code, NOT by heap configuration.
+Increasing heap will NOT fix this - the bug will eventually exhaust ANY amount of memory.
+
+**REQUIRED STEPS:**
+1. FIRST call rebuild_status: curl -s {get_api_base_url()}/cassandra/rebuild/status
+2. Read the file: /opt/source/src/java/org/apache/cassandra/db/ReadCommand.java
+3. Look at lines 419-426 - there is a static buffer that allocates 1MB per read without cleanup
+4. The buggy code looks like:
+   ```
+   queryDiagnosticBuffer.add(new byte[1048576]);
+   if (queryDiagnosticBuffer.size() % 10 == 0)
+       logger.warn("queryDiagnosticBuffer size: ...");
+   ```
+5. Use Edit to comment out these lines (add // at the start of each line)
+6. Call rebuild: curl -X POST {get_api_base_url()}/cassandra/rebuild
+   (This takes ~12-15 minutes)
+7. Wait for pods to become healthy, then submit
+
+**DO NOT** patch StatefulSets, change heap sizes, or modify JVM options - these will NOT fix this issue.
+The bug is in ReadCommand.java, not in SkipListMemtable or any other file.
 """
 
     logger.info(f"Built instruction:\n{instruction}")

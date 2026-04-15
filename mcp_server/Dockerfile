@@ -23,6 +23,7 @@ COPY clients/ ./clients/
 COPY scripts/ ./scripts/
 COPY llm_backend/ ./llm_backend/
 COPY logger/ ./logger/
+COPY distributed/ ./distributed/
 
 # Install dependencies with uv
 RUN uv sync --frozen --no-dev
