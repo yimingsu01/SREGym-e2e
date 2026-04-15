@@ -290,21 +290,33 @@ spec:
             raise RuntimeError(f"CQL execution failed:\nstdout: {result.stdout}\nstderr: {result.stderr}")
         return result.stdout
 
-    def update_server_image(self, new_image: str):
-        """Patch the K8ssandraCluster to use a new server image and wait for rolling restart.
+    def update_server_image(self, new_image: str, wait: bool = False):
+        """Patch the K8ssandraCluster to use a new server image.
 
         Called after the agent rebuilds Cassandra from modified source.
         The patch adds (or replaces) ``spec.cassandra.serverImage`` in the CR;
-        K8ssandra performs a rolling restart so pods pick up the new image.
+        then deletes pods to force them to restart with the new image.
+
+        Args:
+            new_image: The Docker image tag to deploy.
+            wait: If True, block until cluster is ready. Default False to avoid
+                  hanging if the new image has bugs that prevent startup.
         """
         import json as _json
 
         patch = _json.dumps({"spec": {"cassandra": {"serverImage": new_image}}})
         logger.info(f"Patching K8ssandraCluster to use image: {new_image}")
         _run(f"kubectl patch k8ssandracluster {self.cluster_name} -n {self.namespace} --type=merge -p '{patch}'")
-        logger.info("Image patched — waiting for rolling restart to complete")
-        self._wait_for_cluster_ready()
-        logger.info(f"Cluster ready with new image: {new_image}")
+
+        # K8ssandra doesn't auto-restart pods on image change - delete pods to force restart
+        logger.info("Deleting Cassandra pods to force restart with new image...")
+        _run(f"kubectl delete pods -n {self.namespace} -l app.kubernetes.io/name=cassandra --wait=false")
+        logger.info("Pods deleted — new pods will start with updated image")
+
+        if wait:
+            logger.info("Waiting for rolling restart to complete...")
+            self._wait_for_cluster_ready()
+            logger.info(f"Cluster ready with new image: {new_image}")
 
     def delete(self):
         """Delete the Cassandra cluster CR."""

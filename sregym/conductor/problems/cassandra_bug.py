@@ -39,6 +39,10 @@ class CassandraBugProblem(Problem):
     root_cause_file: str
     allows_rebuild: bool = False  # subclasses set this to True to enable POST /cassandra/rebuild
 
+    def requires_openebs(self) -> bool:
+        """Cassandra problems require OpenEBS for persistent storage."""
+        return True
+
     def _create_app(self) -> Cassandra:
         """Factory method — override in subclasses to customise the Cassandra deployment."""
         return Cassandra(cassandra_version=self.cassandra_version)

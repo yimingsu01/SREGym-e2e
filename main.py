@@ -426,7 +426,12 @@ def main(args):
         install_script=agent_reg.install_script if agent_reg else None,
     )
 
-    conductor_config = ConductorConfig(deploy_loki=not args.use_external_harness, enable_noise=args.noise)
+    conductor_config = ConductorConfig(
+        deploy_loki=not args.use_external_harness,
+        deploy_openebs=not args.skip_openebs,
+        deploy_observability=not args.skip_observability,
+        enable_noise=args.noise,
+    )
     conductor = Conductor(config=conductor_config)
 
     # Start the driver in the background; it will call request_shutdown() when finished
@@ -556,6 +561,16 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Resume from a previous results CSV file. Problems already in the CSV will be skipped.",
+    )
+    parser.add_argument(
+        "--skip-openebs",
+        action="store_true",
+        help="Skip deploying OpenEBS storage (use existing storage setup)",
+    )
+    parser.add_argument(
+        "--skip-observability",
+        action="store_true",
+        help="Skip deploying observability stack (Prometheus, Jaeger, OTel Collector, Loki)",
     )
     args = parser.parse_args()
 

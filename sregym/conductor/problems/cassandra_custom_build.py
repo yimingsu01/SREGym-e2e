@@ -74,6 +74,13 @@ class CassandraCustomBuildProblem(CassandraBugProblem):
             name="cassandra",
         )
 
+        # CRITICAL: Reset source to original git state before applying patches.
+        # This ensures each benchmark run starts from the same baseline, even if
+        # a previous agent modified the source (e.g., to fix a bug). Without this,
+        # the next run would see an already-fixed source and the patch would have
+        # no effect.
+        source_manager.reset_source(source_path)
+
         # Build the custom image (skipped if already cached for this patch hash).
         build_mgr = CassandraBuildManager(source_path, self.cassandra_version)
         self._custom_image = build_mgr.build_with_patches(Path(self.patch_dir))

@@ -35,6 +35,8 @@ class ConductorConfig:
     """Configuration for Conductor deployment options."""
 
     deploy_loki: bool = True
+    deploy_openebs: bool = True
+    deploy_observability: bool = True  # Prometheus, Jaeger, OTel Collector
     enable_noise: bool = False
 
 
@@ -600,43 +602,54 @@ class Conductor:
             self.logger.info("[DEPLOY] Deploying Khaos DaemonSet...")
             self.khaos.ensure_deployed()
 
-        self.logger.info("[DEPLOY] Setting up OpenEBS…")
-        self.kubectl.exec_command("kubectl apply -f https://openebs.github.io/charts/openebs-operator.yaml")
-        self.kubectl.exec_command(
-            "kubectl patch storageclass openebs-hostpath "
-            '-p \'{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}\''
-        )
-        self.kubectl.wait_for_ready("openebs")
+        # Deploy OpenEBS if configured OR if the problem requires it for storage
+        if self.config.deploy_openebs or problem.requires_openebs():
+            self.logger.info("[DEPLOY] Setting up OpenEBS (using ghcr.io images)…")
+            # Download operator YAML and replace docker.io images with ghcr.io to avoid rate limits
+            self.kubectl.exec_command(
+                "curl -sL https://openebs.github.io/charts/openebs-operator.yaml | "
+                "sed 's|openebs/|ghcr.io/openebs/|g' | kubectl apply -f -"
+            )
+            self.kubectl.exec_command(
+                "kubectl patch storageclass openebs-hostpath "
+                '-p \'{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}\''
+            )
+            self.kubectl.wait_for_ready("openebs")
 
-        print("Setting up OpenEBS LocalPV-Device…")
-        device_sc_yaml = """
-        apiVersion: storage.k8s.io/v1
-        kind: StorageClass
-        metadata:
-        name: openebs-device
-        annotations:
-            openebs.io/cas-type: local
-        provisioner: openebs.io/local
-        parameters:
-        localpvType: "device"
-        volumeBindingMode: WaitForFirstConsumer
-        """
-        self.kubectl.exec_command("kubectl apply -f - <<EOF\n" + device_sc_yaml + "\nEOF")
-
-        self.logger.info("[DEPLOY] Deploying Prometheus…")
-        self.prometheus.deploy()
-
-        self.logger.info("[DEPLOY] Deploying Jaeger…")
-        self.jaeger.deploy()
-
-        self.logger.info("[DEPLOY] Deploying OTel Collector…")
-        self.otel_collector.deploy()
-
-        if self.config.deploy_loki:
-            self.logger.info("[DEPLOY] Deploying Loki…")
-            self.loki.deploy()
+            print("Setting up OpenEBS LocalPV-Device…")
+            device_sc_yaml = """
+            apiVersion: storage.k8s.io/v1
+            kind: StorageClass
+            metadata:
+            name: openebs-device
+            annotations:
+                openebs.io/cas-type: local
+            provisioner: openebs.io/local
+            parameters:
+            localpvType: "device"
+            volumeBindingMode: WaitForFirstConsumer
+            """
+            self.kubectl.exec_command("kubectl apply -f - <<EOF\n" + device_sc_yaml + "\nEOF")
         else:
-            self.logger.info("[DEPLOY] Skipping Loki deployment (external harness mode)")
+            self.logger.info("[DEPLOY] Skipping OpenEBS deployment")
+
+        if self.config.deploy_observability:
+            self.logger.info("[DEPLOY] Deploying Prometheus…")
+            self.prometheus.deploy()
+
+            self.logger.info("[DEPLOY] Deploying Jaeger…")
+            self.jaeger.deploy()
+
+            self.logger.info("[DEPLOY] Deploying OTel Collector…")
+            self.otel_collector.deploy()
+
+            if self.config.deploy_loki:
+                self.logger.info("[DEPLOY] Deploying Loki…")
+                self.loki.deploy()
+            else:
+                self.logger.info("[DEPLOY] Skipping Loki deployment (external harness mode)")
+        else:
+            self.logger.info("[DEPLOY] Skipping observability stack (Prometheus, Jaeger, OTel, Loki)")
 
         self.logger.info("[DEPLOY] Deploying MCP server…")
         self.mcp_server.deploy()

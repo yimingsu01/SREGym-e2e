@@ -20,6 +20,10 @@ class Problem(ABC):
         """Override this method to return True if the problem requires Khaos for fault injection."""
         return False
 
+    def requires_openebs(self) -> bool:
+        """Override this method to return True if the problem requires OpenEBS storage."""
+        return False
+
     @classmethod
     def build_structured_root_cause(
         cls,

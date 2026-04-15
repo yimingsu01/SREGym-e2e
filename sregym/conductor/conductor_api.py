@@ -174,7 +174,7 @@ async def get_app():
 
 @app.post("/cassandra/rebuild")
 async def rebuild_cassandra():
-    """Compile the agent-modified Cassandra source and deploy the new image.
+    """Compile the agent-modified Cassandra source and trigger deployment.
 
     The agent should call this endpoint after editing files under ``/opt/source``.
     The endpoint:
@@ -182,10 +182,10 @@ async def rebuild_cassandra():
          faster on subsequent runs due to incremental compilation).
       2. Builds a Docker image extending the K8ssandra management API base.
       3. Loads the image into the kind cluster.
-      4. Patches the K8ssandraCluster CR with ``serverImage`` and waits for the
-         rolling restart to complete.
+      4. Patches the K8ssandraCluster CR with ``serverImage`` to trigger a rolling restart.
 
-    Returns ``{"status": "deployed", "image": "<image:tag>"}`` on success.
+    Returns immediately after triggering the restart (does NOT wait for cluster ready).
+    Returns ``{"status": "triggered", "image": "<image:tag>"}`` on success.
 
     Example::
 
@@ -233,7 +233,7 @@ async def rebuild_cassandra():
         logger.error(f"Cassandra rebuild failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {"status": "deployed", "image": new_image}
+    return {"status": "triggered", "image": new_image}
 
 
 @app.get("/cassandra/rebuild/status")
