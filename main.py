@@ -347,12 +347,14 @@ def _run_driver_and_shutdown(
 
 def _ensure_kind_cluster():
     """Ensure a kind cluster exists, creating one if necessary."""
-    import subprocess
     import platform
+    import subprocess
 
     result = subprocess.run(
         "kind get clusters",
-        shell=True, capture_output=True, text=True,
+        shell=True,
+        capture_output=True,
+        text=True,
     )
     if "kind" in result.stdout:
         logger.info("✅ Kind cluster already exists")
@@ -373,7 +375,9 @@ def _ensure_kind_cluster():
 
     result = subprocess.run(
         f"kind create cluster --config {config_file}",
-        shell=True, capture_output=True, text=True,
+        shell=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         logger.error(f"❌ Failed to create kind cluster: {result.stderr}")
