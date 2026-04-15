@@ -357,7 +357,7 @@ public abstract class ReadCommand extends AbstractReadQuery
     public ReadResponse createEmptyResponse()
     {
         UnfilteredPartitionIterator iterator = EmptyIterators.unfilteredPartition(metadata());
-        
+
         return isDigestQuery()
                ? ReadResponse.createDigestResponse(iterator, this)
                : ReadResponse.createDataResponse(iterator, this, RepairedDataInfo.NO_OP_REPAIRED_DATA_INFO);
@@ -792,7 +792,7 @@ public abstract class ReadCommand extends AbstractReadQuery
     // Skip purgeable tombstones. We do this because it's safe to do (post-merge of the memtable and sstable at least), it
     // can save us some bandwith, and avoid making us throw a TombstoneOverwhelmingException for purgeable tombstones (which
     // are to some extend an artefact of compaction lagging behind and hence counting them is somewhat unintuitive).
-    protected UnfilteredPartitionIterator withoutPurgeableTombstones(UnfilteredPartitionIterator iterator, 
+    protected UnfilteredPartitionIterator withoutPurgeableTombstones(UnfilteredPartitionIterator iterator,
                                                                      ColumnFamilyStore cfs,
                                                                      ReadExecutionController controller)
     {
@@ -883,7 +883,7 @@ public abstract class ReadCommand extends AbstractReadQuery
         {
             this.repairedDataInfo = controller.getRepairedDataInfo();
             this.isTrackingRepairedStatus = controller.isTrackingRepairedStatus();
-            
+
             if (isTrackingRepairedStatus)
             {
                 for (SSTableReader sstable : view.sstables)

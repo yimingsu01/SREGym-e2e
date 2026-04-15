@@ -27,6 +27,7 @@ import logging
 import subprocess
 from pathlib import Path
 
+from sregym.conductor.oracles.code_fix_mitigation import CodeFixMitigationOracle
 from sregym.conductor.problems.cassandra_custom_build import CassandraCustomBuildProblem
 from sregym.service.apps.cassandra import Cassandra, CassandraWithCustomImage
 from sregym.utils.decorators import mark_fault_injected
@@ -46,10 +47,7 @@ _SETUP_CQL = """
 """
 
 # Seed a handful of rows so reads actually hit storage paths.
-_SEED_CQL = "\n".join(
-    f"INSERT INTO bench_ks.events (id, val) VALUES ({i}, 'data_{i}');"
-    for i in range(20)
-)
+_SEED_CQL = "\n".join(f"INSERT INTO bench_ks.events (id, val) VALUES ({i}, 'data_{i}');" for i in range(20))
 
 _READ_CQL = "SELECT * FROM bench_ks.events;"
 
@@ -122,11 +120,17 @@ class CassandraOomRead(CassandraCustomBuildProblem):
       - Pods restart and immediately OOM again → CrashLoopBackOff
 
     The agent must locate the rogue static buffer in ReadCommand.java.
+
+    Code fix workflow:
+      Agent can edit /opt/source/src/java/org/apache/cassandra/db/ReadCommand.java
+      to remove the queryDiagnosticBuffer field and its allocation, then call
+      rebuild_cassandra to recompile and redeploy.
     """
 
     cassandra_version = "4.1.7"
     source_git_ref = "cassandra-4.1.7"
     patch_dir = Path(__file__).parent / "patches" / "cassandra_oom_read"
+    allows_rebuild = True  # Enable agent to rebuild Cassandra after code fixes
 
     root_cause_file = "src/java/org/apache/cassandra/db/ReadCommand.java"
     root_cause_description = (
@@ -142,6 +146,15 @@ class CassandraOomRead(CassandraCustomBuildProblem):
     )
 
     trigger_cql = _SETUP_CQL
+
+    def __init__(self):
+        super().__init__()
+        # Attach code fix verification oracle for mitigation stage
+        self.mitigation_oracle = CodeFixMitigationOracle(
+            problem=self,
+            error_patterns=["OutOfMemoryError", "queryDiagnosticBuffer size:"],
+            stability_window=120,  # Wait 2 minutes to ensure fix is stable
+        )
 
     def _create_app(self) -> Cassandra:
         return _CassandraWithOomKill(
@@ -163,10 +176,7 @@ class CassandraOomRead(CassandraCustomBuildProblem):
         logger.info("[CassandraOomRead] Fault already active — OOM will occur from internal reads during startup")
 
     def _deploy_reader(self):
-        cass_host = (
-            f"{self.app.cluster_name}-{self.app.datacenter_name}-service"
-            f".{self.namespace}.svc.cluster.local"
-        )
+        cass_host = f"{self.app.cluster_name}-{self.app.datacenter_name}-service.{self.namespace}.svc.cluster.local"
         secret_name = f"{self.app.cluster_name}-superuser"
 
         # Store the script in a ConfigMap so YAML quoting issues don't corrupt it.
@@ -265,7 +275,10 @@ spec:
         for name, yaml in [("ConfigMap", configmap), ("Deployment", manifest)]:
             result = subprocess.run(
                 "kubectl apply -f -",
-                shell=True, input=yaml, capture_output=True, text=True,
+                shell=True,
+                input=yaml,
+                capture_output=True,
+                text=True,
             )
             if result.returncode != 0:
                 logger.warning(f"[CassandraOomRead] Reader {name} deploy failed: {result.stderr.strip()}")
@@ -277,6 +290,7 @@ spec:
         subprocess.run(
             f"kubectl delete deployment cassandra-reader -n {self.namespace} --ignore-not-found"
             f" && kubectl delete configmap cassandra-reader-script -n {self.namespace} --ignore-not-found",
-            shell=True, check=False,
+            shell=True,
+            check=False,
         )
         logger.info("[CassandraOomRead] Reader workload deleted")
