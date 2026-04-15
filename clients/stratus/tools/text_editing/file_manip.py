@@ -24,25 +24,25 @@ def update_file_vars_in_state(
     message: str | ToolMessage | AIMessage | HumanMessage,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> State:
-    logger.info("updating state with message: %s", message)
-    logger.info(f"state: {state}, tool_call_id: {tool_call_id}")
+    logger.debug("updating state with message: %s", message)
+    logger.debug(f"state has {len(state.get('messages', []))} messages, tool_call_id: {tool_call_id}")
     new_state = state
 
     match message:
         case str():
-            logger.info("Not updating state as message is a string")
+            logger.debug("Not updating state as message is a string")
             new_state["messages"] = new_state["messages"] + [ToolMessage(content=message, tool_call_id=tool_call_id)]
         case ToolMessage():
-            logger.info("Trying to update states with message as ToolMessage")
+            logger.debug("Trying to update states with message as ToolMessage")
             tool_call_msg = ""
             for i in range(len(new_state["messages"]) - 1, -1, -1):
                 if hasattr(new_state["messages"][i], "tool_calls") and len(new_state["messages"][i].tool_calls) > 0:
                     tool_call_msg = new_state["messages"][i]
-                    logger.info("Found last tool call message: %s", tool_call_msg)
+                    logger.debug("Found last tool call message: %s", tool_call_msg)
                     break
             tool_name = tool_call_msg.tool_calls[0]["name"]
             tool_args = tool_call_msg.tool_calls[0]["args"]
-            logger.info("Found tool args: %s", tool_args)
+            logger.debug("Found tool args: %s", tool_args)
             if tool_name == "open_file":
                 new_state["curr_file"] = tool_args["path"]
                 new_state["curr_line"] = tool_args["line_number"]
@@ -58,9 +58,9 @@ def update_file_vars_in_state(
 
             new_state["messages"] = new_state["messages"] + [message]
         case _:
-            logger.info("Not found open_file or goto_line in message: %s", message)
-            logger.info("Not updating state")
-    logger.info("Updated state: %s", new_state)
+            logger.debug("Not found open_file or goto_line in message: %s", message)
+            logger.debug("Not updating state")
+    logger.debug("Updated state with %d messages", len(new_state.get("messages", [])))
     return new_state
 
 
@@ -71,7 +71,7 @@ def open_file(
     path: str | None = None,
     line_number: str | None = None,
 ) -> Command:
-    logger.info("in open_file, the last msg: %s", state["messages"][-1])
+    logger.debug("open_file called with path: %s, line: %s", path, line_number)
     if path is None:
         msg_txt = 'Usage: open "<file>" [<line_number>]'
         return Command(
@@ -300,6 +300,13 @@ def edit(
 
     wf = WindowedFile(path=state["curr_file"])
 
+    # Restore window position from state (set by open_file or goto_line)
+    if state.get("curr_line"):
+        try:
+            wf.goto(int(state["curr_line"]) - 1, mode="top")
+        except (ValueError, TypeError):
+            pass  # Invalid curr_line, use default position
+
     # Turn \\n into \n etc., i.e., undo the escaping
     # args.replace = args.replace.encode("utf8").decode("unicode_escape")
 
@@ -384,6 +391,13 @@ def insert(
         msg_txt = "No file opened. Either `open` or `create` a file first."
         return Command(update=update_file_vars_in_state(state, msg_txt, tool_call_id))
     wf = WindowedFile(state["curr_file"])
+
+    # Restore window position from state (for display after insert)
+    if state.get("curr_line"):
+        try:
+            wf.goto(int(state["curr_line"]) - 1, mode="top")
+        except (ValueError, TypeError):
+            pass
 
     pre_edit_lint = flake8(wf.path)
     insert_info = wf.insert(text, line=line_number - 1 if line_number is not None else None)

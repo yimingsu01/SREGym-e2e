@@ -250,6 +250,10 @@ class BaseAgent:
             "submitted": False,
             "rollback_stack": "",
             "executed_commands": [],
+            # File editing state - used by text_editing tools
+            "curr_file": "",
+            "curr_line": 0,
+            "workdir": "/opt/source",  # Default to source directory in container
         }
         graph_config = {
             "recursion_limit": 10000,

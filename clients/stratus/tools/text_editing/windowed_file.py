@@ -87,8 +87,8 @@ class WindowedFile:
                 exit(1)
             raise FileNotFoundError(msg)
 
-        # FIXME: magic number, defaulting window to 10 lines
-        self.window = 10
+        # FIXME: magic number, defaulting window to 50 lines (increased from 10 to allow larger edits)
+        self.window = 50
         # FIXME: magic number, set to default from swe-agent now
         self.overlap = 0
         # Ensure that we get a valid current line by using the setter

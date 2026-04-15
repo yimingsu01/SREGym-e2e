@@ -10,9 +10,10 @@ class State(TypedDict):
     # in the annotation defines how this state key should be updated
     # (in this case, it appends messages to the list, rather than overwriting them)
     messages: Annotated[list, add_messages]
-    # workdir: str
-    # curr_file: str
-    # curr_line: int
+    # File editing state - used by text_editing tools
+    workdir: str  # Parent directory of currently open file
+    curr_file: str  # Path to currently open file
+    curr_line: int  # Current line number (1-indexed for display)
     # number or rounds used to finish assigned tasks
     # num_rounds: int
     num_steps: int

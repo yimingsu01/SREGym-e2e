@@ -15,7 +15,9 @@ from clients.stratus.tools.kubectl_tools import (
     RollbackCommand,
 )
 from clients.stratus.tools.prometheus_tools import get_metrics
+from clients.stratus.tools.rebuild_tools import rebuild_cassandra, rebuild_status
 from clients.stratus.tools.submit_tool import fake_submit_tool, rollback_submit_tool, submit_tool
+from clients.stratus.tools.text_editing.file_manip import create, edit, goto_line, insert, open_file
 from clients.stratus.tools.wait_tool import wait_tool
 
 logger = get_logger()
@@ -77,3 +79,19 @@ def str_to_tool(tool_struct: dict[str, str]):
         client = get_client()
         get_previous_rollbackable_cmd = GetPreviousRollbackableCmd(client)
         return get_previous_rollbackable_cmd
+    # File editing tools for code-level bug fixing
+    elif tool_struct["name"] == "open_file":
+        return open_file
+    elif tool_struct["name"] == "goto_line":
+        return goto_line
+    elif tool_struct["name"] == "edit":
+        return edit
+    elif tool_struct["name"] == "insert":
+        return insert
+    elif tool_struct["name"] == "create_file":
+        return create
+    # Cassandra rebuild tools for code-level bug fixing
+    elif tool_struct["name"] == "rebuild_cassandra":
+        return rebuild_cassandra
+    elif tool_struct["name"] == "rebuild_status":
+        return rebuild_status
