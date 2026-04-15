@@ -13,6 +13,7 @@ from mcp_server.jaeger_server import mcp as observability_mcp
 from mcp_server.kubectl_mcp_tools import kubectl_mcp
 from mcp_server.loki_server import mcp as loki_mcp
 from mcp_server.prometheus_server import mcp as prometheus_mcp
+from mcp_server.rebuild_server import mcp as rebuild_mcp
 from mcp_server.submit_server import mcp as submit_mcp
 from sregym.service.k8s_proxy import KubernetesAPIProxy
 
@@ -25,6 +26,7 @@ routes = [
     Mount("/loki", app=create_sse_app(loki_mcp, "/messages/", "/sse")),
     Mount("/prometheus", app=create_sse_app(prometheus_mcp, "/messages/", "/sse")),
     Mount("/submit", app=create_sse_app(submit_mcp, "/messages/", "/sse")),
+    Mount("/rebuild", app=create_sse_app(rebuild_mcp, "/messages/", "/sse")),
 ]
 
 app = Starlette(
