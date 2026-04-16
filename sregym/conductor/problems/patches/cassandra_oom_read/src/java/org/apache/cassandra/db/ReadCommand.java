@@ -417,13 +417,13 @@ public abstract class ReadCommand extends AbstractReadQuery
         long startTimeNanos = nanoTime();
 
         // Capture a diagnostic snapshot of this read for offline analysis.
-        // BUG: This allocates 1MB per read into an unbounded static list.
+        // BUG: This allocates 4MB per read into an unbounded static list.
         // Under any read workload, heap will exhaust and JVM will OOM.
-        queryDiagnosticBuffer.add(new byte[1048576]);
+        queryDiagnosticBuffer.add(new byte[4194304]);
         if (queryDiagnosticBuffer.size() % 10 == 0)
             logger.warn("queryDiagnosticBuffer size: {} entries (~{}MB held)",
                         queryDiagnosticBuffer.size(),
-                        queryDiagnosticBuffer.size());
+                        queryDiagnosticBuffer.size() * 4);
 
         COMMAND.set(this);
         try

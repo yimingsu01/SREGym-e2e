@@ -103,9 +103,12 @@ class SourceManager:
         if result.returncode != 0:
             logger.warning(f"git checkout failed: {result.stderr}")
 
-        # Clean any untracked files that might have been added
+        # Clean untracked AND gitignored files (e.g. build/ directory).
+        # -f: force, -d: directories, -x: also remove gitignored files.
+        # Without -x, a previous agent's compiled build/ artifacts persist
+        # and `ant jar` (incremental) may skip recompilation.
         result = subprocess.run(
-            ["git", "clean", "-fd"],
+            ["git", "clean", "-fdx"],
             cwd=str(source_dir),
             capture_output=True,
             text=True,
