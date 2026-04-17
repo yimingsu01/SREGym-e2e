@@ -27,12 +27,22 @@ class CodeFixMitigationOracle(MitigationOracle):
         problem: The problem instance
         error_patterns: List of error strings that should NOT appear in logs after fix
         stability_window: Seconds to wait and re-check stability (default: 120)
+        pod_label_selector: kubectl label selector used to fetch logs. Defaults
+            to ``app.kubernetes.io/name=cassandra`` for back-compat; other
+            systems override (e.g. ``strimzi.io/cluster=my-kafka``).
     """
 
-    def __init__(self, problem, error_patterns: list[str], stability_window: int = 120):
+    def __init__(
+        self,
+        problem,
+        error_patterns: list[str],
+        stability_window: int = 120,
+        pod_label_selector: str = "app.kubernetes.io/name=cassandra",
+    ):
         super().__init__(problem)
         self.error_patterns = error_patterns
         self.stability_window = stability_window
+        self.pod_label_selector = pod_label_selector
 
     def evaluate(self, solution=None, trace=None, duration=None) -> dict:
         """Evaluate whether the code fix resolved the issue.
@@ -125,13 +135,11 @@ class CodeFixMitigationOracle(MitigationOracle):
         """
         namespace = self.problem.namespace
 
-        # Try to get logs using kubectl
-        # K8ssandra uses app.kubernetes.io/name=cassandra label
         cmd = [
             "kubectl",
             "logs",
             "-l",
-            "app.kubernetes.io/name=cassandra",
+            self.pod_label_selector,
             "-n",
             namespace,
             "--tail=1000",
