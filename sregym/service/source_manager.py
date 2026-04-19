@@ -78,3 +78,42 @@ class SourceManager:
         )
         logger.info(f"Full clone + checkout successful at {source_dir}")
         return source_dir
+
+    def reset_source(self, source_dir: Path) -> None:
+        """Reset the source directory to its original git state.
+
+        Discards all local modifications (uncommitted changes) so patches
+        can be cleanly re-applied. This ensures each benchmark run starts
+        from the same baseline source code.
+        """
+        source_dir = Path(source_dir)
+        if not (source_dir / ".git").exists():
+            logger.warning(f"Cannot reset {source_dir} — not a git repository")
+            return
+
+        logger.info(f"Resetting source at {source_dir} to original git state...")
+
+        # Discard all uncommitted changes (modified and untracked files in tracked paths)
+        result = subprocess.run(
+            ["git", "checkout", "--", "."],
+            cwd=str(source_dir),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.warning(f"git checkout failed: {result.stderr}")
+
+        # Clean untracked AND gitignored files (e.g. build/ directory).
+        # -f: force, -d: directories, -x: also remove gitignored files.
+        # Without -x, a previous agent's compiled build/ artifacts persist
+        # and `ant jar` (incremental) may skip recompilation.
+        result = subprocess.run(
+            ["git", "clean", "-fdx"],
+            cwd=str(source_dir),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.warning(f"git clean failed: {result.stderr}")
+
+        logger.info(f"Source reset complete at {source_dir}")

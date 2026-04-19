@@ -82,10 +82,18 @@ class CassandraBuildManager:
 
         The returned image is guaranteed to be present in the local Docker daemon
         and loaded into the kind cluster (if kind is running).
+
+        IMPORTANT: Patches are ALWAYS applied to the source tree, even if the
+        Docker image is cached. This ensures the agent sees the buggy code at
+        /opt/source when investigating.
         """
         patch_dir = Path(patch_dir)
         if not patch_dir.exists():
             raise FileNotFoundError(f"Patch directory not found: {patch_dir}")
+
+        # ALWAYS apply patches to source so agent can see the buggy code.
+        # This must happen before the cache check.
+        self._apply_patches(patch_dir)
 
         patch_hash = self._hash_dir(patch_dir)
         versioned = hashlib.sha256(f"{_DOCKERFILE_VERSION}:{patch_hash}".encode()).hexdigest()
@@ -97,7 +105,6 @@ class CassandraBuildManager:
             return image_tag
 
         logger.info(f"[BuildMgr] Building custom Cassandra image {image_tag}")
-        self._apply_patches(patch_dir)
         self._build_jar()
         self._build_docker_image(image_tag)
         self._load_into_kind(image_tag)
@@ -142,11 +149,13 @@ class CassandraBuildManager:
         return 0
 
     def _build_jar(self):
-        """Compile the patched source with ``ant jar``.
+        """Compile the patched source with ``ant clean jar``.
 
         Cassandra 4.x requires JDK 11.  If the system JDK is too new (>= 12)
         the compilation is run inside an eclipse-temurin:11 Docker container
         that has ant pre-installed, with the source tree bind-mounted.
+
+        Always runs ``ant clean`` first to ensure no stale class files.
         """
         java_ver = self._java_major_version()
         use_docker = java_ver == 0 or java_ver >= 12
@@ -159,11 +168,11 @@ class CassandraBuildManager:
         else:
             self._require_ant()
             logger.info(
-                f"[BuildMgr] Running `ant jar` locally (JDK {java_ver}) in {self.source_path}  "
-                "(first run ~5 min; subsequent runs faster)"
+                f"[BuildMgr] Running `ant clean jar` locally (JDK {java_ver}) in {self.source_path}  "
+                "(clean build ~5 min)"
             )
             result = subprocess.run(
-                "ant jar -Duse.jdk11=true",
+                "ant clean jar -Duse.jdk11=true",
                 cwd=self.source_path,
                 shell=True,
                 capture_output=True,
@@ -177,9 +186,9 @@ class CassandraBuildManager:
             logger.info("[BuildMgr] ant jar succeeded")
 
     def _build_jar_in_docker(self):
-        """Run ``ant jar`` inside an eclipse-temurin:11 container (JDK 11 + apt ant)."""
+        """Run ``ant clean jar`` inside an eclipse-temurin:11 container (JDK 11 + apt ant)."""
         logger.info(
-            f"[BuildMgr] Docker-based ant build — source: {self.source_path}  "
+            f"[BuildMgr] Docker-based ant clean build — source: {self.source_path}  "
             "(first run pulls image + installs ant, ~5-10 min)"
         )
         # The bind-mount uses the same path inside the container for simplicity.
@@ -189,7 +198,7 @@ class CassandraBuildManager:
             f"-w {self.source_path} "
             f"eclipse-temurin:11 "
             f"bash -c 'apt-get update -qq && apt-get install -y -q ant && "
-            f"ant jar -Duse.jdk11=true'"
+            f"ant clean jar -Duse.jdk11=true'"
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if result.returncode != 0:

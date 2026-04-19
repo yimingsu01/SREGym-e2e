@@ -290,21 +290,82 @@ spec:
             raise RuntimeError(f"CQL execution failed:\nstdout: {result.stdout}\nstderr: {result.stderr}")
         return result.stdout
 
-    def update_server_image(self, new_image: str):
-        """Patch the K8ssandraCluster to use a new server image and wait for rolling restart.
+    def update_server_image(self, new_image: str, wait: bool = False):
+        """Replace the running Cassandra cluster with a freshly built image.
 
-        Called after the agent rebuilds Cassandra from modified source.
-        The patch adds (or replaces) ``spec.cassandra.serverImage`` in the CR;
-        K8ssandra performs a rolling restart so pods pick up the new image.
+        K8ssandra's rolling-update strategy stalls when the current pods are
+        crash-looping (OOM, etc.) because it waits for each pod to become ready
+        before updating the next.  To guarantee the new image is used we tear
+        down the operator and cluster entirely, then redeploy from scratch.
+
+        Sequence:
+          1. Delete the K8ssandraCluster CR (removes StatefulSet + pods)
+          2. Helm uninstall k8ssandra-operator
+          3. Wait for resources to drain
+          4. Helm install k8ssandra-operator
+          5. Deploy a fresh K8ssandraCluster CR with ``serverImage: new_image``
+
+        Args:
+            new_image: Docker image tag to deploy.
+            wait: If True, block until cluster is ready.
         """
-        import json as _json
+        logger.info(f"Tearing down and redeploying cluster with image: {new_image}")
 
-        patch = _json.dumps({"spec": {"cassandra": {"serverImage": new_image}}})
-        logger.info(f"Patching K8ssandraCluster to use image: {new_image}")
-        _run(f"kubectl patch k8ssandracluster {self.cluster_name} -n {self.namespace} --type=merge -p '{patch}'")
-        logger.info("Image patched — waiting for rolling restart to complete")
-        self._wait_for_cluster_ready()
-        logger.info(f"Cluster ready with new image: {new_image}")
+        # 1. Delete the cluster CR (operator will clean up StatefulSet, pods, etc.)
+        logger.info("Deleting K8ssandraCluster CR...")
+        _run(
+            f"kubectl delete k8ssandracluster {self.cluster_name} -n {self.namespace} --ignore-not-found --timeout=60s",
+            check=False,
+        )
+
+        # 2. Wait for Cassandra pods to drain
+        logger.info("Waiting for Cassandra pods to terminate...")
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            result = subprocess.run(
+                f"kubectl get pods -n {self.namespace} -l app.kubernetes.io/name=cassandra "
+                f"--no-headers 2>/dev/null | wc -l",
+                shell=True,
+                capture_output=True,
+                text=True,
+            )
+            if result.stdout.strip() == "0":
+                break
+            time.sleep(5)
+
+        # 3. Uninstall the operator
+        logger.info("Uninstalling K8ssandra operator...")
+        _run(
+            f"helm uninstall k8ssandra-operator -n {self.operator_namespace} --wait",
+            check=False,
+        )
+        # Wait for operator pods to drain
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            result = subprocess.run(
+                f"kubectl get pods -n {self.operator_namespace} --no-headers 2>/dev/null | wc -l",
+                shell=True,
+                capture_output=True,
+                text=True,
+            )
+            if result.stdout.strip() == "0":
+                break
+            time.sleep(5)
+
+        # 4. Update our image reference and redeploy everything
+        if hasattr(self, "custom_image"):
+            self.custom_image = new_image
+        logger.info("Reinstalling K8ssandra operator...")
+        self._install_operator()
+
+        logger.info(f"Deploying fresh K8ssandraCluster with image: {new_image}")
+        self._deploy_cassandra_cluster()
+
+        if wait:
+            self._wait_for_cluster_ready()
+            logger.info(f"Cluster ready with new image: {new_image}")
+        else:
+            logger.info("Cluster deployed (not waiting for ready)")
 
     def delete(self):
         """Delete the Cassandra cluster CR."""

@@ -91,6 +91,7 @@ def parse_issue(url: str, system: str | None = None) -> dict:
 # Issue fetchers
 # ---------------------------------------------------------------------------
 
+
 def _fetch_issue_text(url: str) -> str:
     parsed = urlparse(url)
     if "github.com" in parsed.netloc:
@@ -115,14 +116,16 @@ def _fetch_github_issue(url: str) -> str:
 
     issue_resp = requests.get(
         f"https://api.github.com/repos/{owner}/{repo}/issues/{number}",
-        headers=headers, timeout=30,
+        headers=headers,
+        timeout=30,
     )
     issue_resp.raise_for_status()
     issue = issue_resp.json()
 
     comments_resp = requests.get(
         f"https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments",
-        headers=headers, timeout=30,
+        headers=headers,
+        timeout=30,
     )
     comments_resp.raise_for_status()
 
@@ -180,13 +183,14 @@ def _fetch_jira_issue(url: str) -> str:
 # Claude extraction
 # ---------------------------------------------------------------------------
 
+
 def _extract_spec(issue_text: str, system: str, source_url: str) -> dict:
     client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
     prompt = _EXTRACTION_PROMPT.replace("{issue_text}", issue_text)
 
     message = client.messages.create(
-        model="claude-opus-4-6",
+        model="claude-opus-4-7",
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -206,6 +210,7 @@ def _extract_spec(issue_text: str, system: str, source_url: str) -> dict:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _infer_system(url: str) -> str:
     url_lower = url.lower()

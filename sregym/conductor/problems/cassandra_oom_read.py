@@ -1,6 +1,6 @@
 """Cassandra OOM: unbounded diagnostic buffer in ReadCommand causes heap exhaustion.
 
-Bug: ReadCommand.executeLocally() allocates a 1 MB byte array into a static
+Bug: ReadCommand.executeLocally() allocates a 4 MB byte array into a static
      List<byte[]> (queryDiagnosticBuffer) on EVERY local read.  The list has no
      eviction policy, so it grows without bound.  Even during normal startup,
      Cassandra performs internal reads (system tables, schema, gossip) which
@@ -9,14 +9,14 @@ Bug: ReadCommand.executeLocally() allocates a 1 MB byte array into a static
          java.lang.OutOfMemoryError: Java heap space
 
      The bug logs warnings every 10 reads showing buffer growth:
-         WARN - queryDiagnosticBuffer size: 10 entries (~10MB held)
+         WARN - queryDiagnosticBuffer size: 10 entries (~40MB held)
 
      Kubernetes restarts the container, but internal reads immediately resume,
      the heap fills again, and the node enters CrashLoopBackOff.
 
 Root cause: ReadCommand.java — a diagnostic snapshot buffer accumulated in a
      static field was never removed before the release build.  The allocation
-     (1,048,576 bytes × every local read) is the sole source of heap growth; no
+     (4,194,304 bytes × every local read) is the sole source of heap growth; no
      other change to Cassandra is needed to reproduce the crash.
 
 Fix: remove the queryDiagnosticBuffer field and its single call-site in
@@ -94,7 +94,7 @@ spec:
             cpu: "1"
         config:
           jvmOptions:
-            heapSize: 64M
+            heapSize: 256M
             additionalJvm11ServerOptions:
               - "-XX:OnOutOfMemoryError=/usr/local/bin/oom-kill-mgmt.sh"
               - "-XX:+HeapDumpOnOutOfMemoryError"
@@ -106,7 +106,7 @@ class CassandraOomRead(CassandraCustomBuildProblem):
 
     Fault injection:
       Deploys Cassandra 4.1.7 built from a patched source where
-      ReadCommand.executeLocally() accumulates 1 MB per read into a
+      ReadCommand.executeLocally() accumulates 4 MB per read into a
       static List<byte[]> that is never cleared.
 
       The bug triggers on ALL reads, including internal system reads during
@@ -115,7 +115,7 @@ class CassandraOomRead(CassandraCustomBuildProblem):
 
     Observable symptoms:
       - Cassandra logs show buffer growth warnings every 10 reads:
-          WARN - queryDiagnosticBuffer size: 10 entries (~10MB held)
+          WARN - queryDiagnosticBuffer size: 10 entries (~40MB held)
       - Eventually: java.lang.OutOfMemoryError: Java heap space
       - Pods restart and immediately OOM again → CrashLoopBackOff
 
@@ -134,7 +134,7 @@ class CassandraOomRead(CassandraCustomBuildProblem):
 
     root_cause_file = "src/java/org/apache/cassandra/db/ReadCommand.java"
     root_cause_description = (
-        "ReadCommand.executeLocally() (ReadCommand.java) allocates a 1 MB byte "
+        "ReadCommand.executeLocally() (ReadCommand.java) allocates a 4 MB byte "
         "array into a static, unbounded List<byte[]> (queryDiagnosticBuffer) on "
         "EVERY local read execution, including internal system reads during startup.  "
         "The list has no maximum size and is never cleared.  Even without external "
