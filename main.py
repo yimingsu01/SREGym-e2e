@@ -16,6 +16,7 @@ from logger import init_logger
 from sregym.agent_launcher import AgentLauncher
 from sregym.agent_registry import get_agent, list_agents
 from sregym.conductor.conductor import Conductor, ConductorConfig
+from sregym.conductor.problems.problem_generator import ProblemGenerator
 from sregym.conductor.conductor_api import request_shutdown, run_api
 from sregym.conductor.constants import StartProblemResult
 from sregym.service.container_runner import ContainerRunner, ExecInput
@@ -557,10 +558,33 @@ if __name__ == "__main__":
         default=None,
         help="Resume from a previous results CSV file. Problems already in the CSV will be skipped.",
     )
+    parser.add_argument(
+        "--create",
+        type=str,
+        default=None,
+        metavar="ISSUE_URL",
+        help=(
+            "Generate a problem from a GitHub issue URL and run it immediately. "
+            "Example: --create https://github.com/apache/cassandra/issues/20108"
+        ),
+    )
     args = parser.parse_args()
 
     # Validate that n_attempts is positive
     if args.n_attempts is not None and args.n_attempts < 1:
         parser.error("--n-attempts must be a positive integer")
+
+    if args.create and args.problem:
+        parser.error("--create and --problem are mutually exclusive")
+
+    if args.create:
+        logger.info(f"Generating problem from issue: {args.create}")
+        try:
+            problem_id = ProblemGenerator.generate(args.create)
+        except Exception as e:
+            logger.error(f"Failed to generate problem from {args.create!r}: {e}")
+            sys.exit(1)
+        logger.info(f"Generated problem: {problem_id}")
+        args.problem = problem_id
 
     main(args)

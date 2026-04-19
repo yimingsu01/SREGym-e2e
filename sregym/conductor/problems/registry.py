@@ -1,3 +1,4 @@
+import importlib
 from pathlib import Path
 
 import yaml
@@ -75,6 +76,7 @@ from sregym.conductor.problems.wrong_bin_usage import WrongBinUsage
 from sregym.conductor.problems.wrong_dns_policy import WrongDNSPolicy
 from sregym.conductor.problems.wrong_service_selector import WrongServiceSelector
 from sregym.service.kubectl import KubeCtl
+from sregym.conductor.problems.auto_tidb_67650 import AutoTidb67650
 
 
 # fmt: off
@@ -271,10 +273,40 @@ class ProblemRegistry:
             "operator_security_context_fault": K8SOperatorSecurityContextFault,
             "operator_wrong_update_strategy_fault": K8SOperatorWrongUpdateStrategyFault,
             "operator_wrong_operator_image": K8SOperatorWrongOperatorImage,
+            # AUTOMATIC
+            "auto_tidb_67650": AutoTidb67650,
         }
 # fmt: on
         self.kubectl = KubeCtl()
         self.non_emulated_cluster_problems = []
+        self._load_auto_generated()
+
+    def _load_auto_generated(self):
+        """Import any auto_*.py files and register their problem classes."""
+        from sregym.conductor.problems.generic_custom_build import GenericCustomBuildProblem
+        problems_dir = Path(__file__).parent
+        for py_file in sorted(problems_dir.glob("auto_*.py")):
+            problem_id = py_file.stem
+            if problem_id in self.PROBLEM_REGISTRY:
+                continue
+            try:
+                module = importlib.import_module(
+                    f"sregym.conductor.problems.{problem_id}"
+                )
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    if (
+                        isinstance(attr, type)
+                        and issubclass(attr, GenericCustomBuildProblem)
+                        and attr is not GenericCustomBuildProblem
+                    ):
+                        self.PROBLEM_REGISTRY[problem_id] = attr
+                        break
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"Failed to load auto-generated problem {problem_id}: {e}"
+                )
 
     def get_problem_instance(self, problem_id: str):
         if problem_id not in self.PROBLEM_REGISTRY:

@@ -214,7 +214,7 @@ spec:
                 capture_output=True,
                 text=True,
             )
-            conditions = dict(line.split("=", 1) for line in result.stdout.strip().split("\\n") if "=" in line)
+            conditions = dict(line.split("=", 1) for line in result.stdout.strip().split("\n") if "=" in line)
             if conditions.get("Ready") == "True":
                 logger.info("CassandraDatacenter Ready=True — superuser created, cluster fully ready")
                 return
