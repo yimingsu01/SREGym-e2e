@@ -50,6 +50,14 @@ class GenericDBBuildManager:
             self._load_into_cluster(image_tag)
             return image_tag
 
+        if self.spec.prebuilt_from_stock:
+            logger.info(
+                f"[GenericBuildMgr] prebuilt_from_stock — tagging stock base as {image_tag}"
+            )
+            self._build_prebuilt_image(image_tag)
+            self._load_into_cluster(image_tag)
+            return image_tag
+
         logger.info(f"[GenericBuildMgr] Building from source tree: {image_tag}")
         self._build_artifact()
         self._build_docker_image(image_tag)
@@ -93,29 +101,118 @@ class GenericDBBuildManager:
         else:
             logger.warning("[GenericBuildMgr] No files found in patch directory")
 
+    def _resolve_build_image(self) -> str:
+        """For Go-based builds, detect the required Go version from go.mod."""
+        import re
+        if not self.spec.build_image.startswith("golang:"):
+            return self.spec.build_image
+        go_mod = self.source_path / "go.mod"
+        if not go_mod.exists():
+            return self.spec.build_image
+        m = re.search(r"^go\s+(\d+\.\d+)", go_mod.read_text(), re.MULTILINE)
+        if not m:
+            return self.spec.build_image
+        detected = f"golang:{m.group(1)}"
+        # Pin to Debian Bullseye (glibc 2.31) so the binary is compatible with
+        # Alpine+glibc-compat base images (e.g. TiDB) that don't have glibc 2.32+.
+        # The untagged golang:X.Y is now Bookworm (glibc 2.36) which produces
+        # binaries that crash with "GLIBC_2.32 not found" in those containers.
+        if not any(s in detected for s in ("-bullseye", "-bookworm", "-alpine", "-buster")):
+            detected += "-bullseye"
+        if detected != self.spec.build_image:
+            logger.info(
+                f"[GenericBuildMgr] go.mod requires Go {m.group(1)} — "
+                f"overriding build image {self.spec.build_image!r} → {detected!r}"
+            )
+        return detected
+
     def _build_artifact(self):
-        """Run spec.build_cmd inside spec.build_image with the source tree mounted."""
+        """Run spec.build_cmd inside the resolved build image with the source tree mounted."""
+        import os, tempfile
+        build_image = self._resolve_build_image()
+        host_uid = os.getuid()
+        host_gid = os.getgid()
         logger.info(
-            f"[GenericBuildMgr] Building {self.spec.name} inside {self.spec.build_image} "
+            f"[GenericBuildMgr] Building {self.spec.name} inside {build_image} "
             f"— command: {self.spec.build_cmd}"
         )
-        cmd = (
-            f"docker run --rm "
-            f"--network=host "
-            f"-v {self.source_path}:{self.source_path} "
-            f"-w {self.source_path} "
-            f"{self.spec.build_image} "
-            f"bash -c '{self.spec.build_cmd}'"
+        # Docker runs as root inside the container and writes root-owned files
+        # into the bind-mounted source tree. Without intervention, the host user
+        # (who invoked this tool) can never delete those files — breaking
+        # `git clean -fdx` in SourceManager.reset_source() and corrupting every
+        # subsequent build. We fix this by:
+        #   (1) chown-ing any pre-existing cruft back to the host user on entry,
+        #       so leftovers from older builds are fixed up automatically, and
+        #   (2) installing an EXIT trap that chowns everything created during
+        #       this build back to the host user — even if the build fails.
+        script_content = (
+            "#!/bin/bash\nset -e\n"
+            f"chown -R {host_uid}:{host_gid} {self.source_path} 2>/dev/null || true\n"
+            f"trap 'chown -R {host_uid}:{host_gid} {self.source_path} 2>/dev/null || true' EXIT\n"
+            "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -q --no-install-recommends git)\n"
+            f"git config --global --add safe.directory {self.source_path}\n"
+            f"{self.spec.build_cmd}\n"
         )
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        if result.returncode != 0:
-            out = result.stdout[-3000:] if result.stdout else ""
-            err = result.stderr[-3000:] if result.stderr else ""
-            raise RuntimeError(
-                f"Build failed for {self.spec.name}:\n"
-                f"--- stdout ---\n{out}\n--- stderr ---\n{err}"
+        with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.sh', prefix='/tmp/sregym-build-', delete=False
+        ) as f:
+            f.write(script_content)
+            script_path = f.name
+        os.chmod(script_path, 0o755)
+        try:
+            cmd = (
+                f"docker run --rm "
+                f"--network=host "
+                f"-v {self.source_path}:{self.source_path} "
+                f"-v {script_path}:{script_path} "
+                f"-w {self.source_path} "
+                f"{build_image} "
+                f"bash {script_path}"
             )
-        logger.info(f"[GenericBuildMgr] Build succeeded")
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode != 0:
+                out = result.stdout[-3000:] if result.stdout else ""
+                err = result.stderr[-3000:] if result.stderr else ""
+                raise RuntimeError(
+                    f"Build failed for {self.spec.name}:\n"
+                    f"--- stdout ---\n{out}\n--- stderr ---\n{err}"
+                )
+            logger.info(f"[GenericBuildMgr] Build succeeded")
+        finally:
+            os.unlink(script_path)
+
+    def _build_prebuilt_image(self, image_tag: str):
+        """Create a thin `FROM <base>` image and tag it as `image_tag`.
+
+        Used when `prebuilt_from_stock=True` — the custom image IS the stock
+        base image, just re-tagged so it's distinct from the deploy-time tag
+        (lets the pipeline's image-swap step still cause a rolling restart).
+        """
+        base_image = self._resolve_base_image()
+        subprocess.run(
+            f"docker pull {base_image}",
+            shell=True, capture_output=True, text=True,
+        )
+        build_ctx = Path(tempfile.mkdtemp(prefix=f"sregym-{self.spec.name}-docker-"))
+        try:
+            (build_ctx / "Dockerfile").write_text(f"FROM {base_image}\n")
+            platform = self._cluster_platform()
+            logger.info(f"[GenericBuildMgr] docker buildx build {image_tag} for {platform} (prebuilt)")
+            result = subprocess.run(
+                f"docker buildx build --platform {platform} --load -t {image_tag} .",
+                cwd=build_ctx,
+                shell=True,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"docker buildx build (prebuilt) failed:\n"
+                    f"stdout: {result.stdout}\nstderr: {result.stderr}"
+                )
+            logger.info(f"[GenericBuildMgr] Prebuilt image tagged: {image_tag}")
+        finally:
+            shutil.rmtree(build_ctx, ignore_errors=True)
 
     def _build_docker_image(self, image_tag: str):
         _exclude = ("-tests.jar", "-sources.jar", "-javadoc.jar", "-test-sources.jar")
@@ -124,15 +221,20 @@ class GenericDBBuildManager:
             if not any(a.name.endswith(s) for s in _exclude)
         ]
         if not artifacts:
+            bin_contents = sorted(
+                str(p.relative_to(self.source_path))
+                for p in self.source_path.rglob("*")
+                if p.is_file() and p.stat().st_size > 1_000_000
+            )[:20]
             raise FileNotFoundError(
-                f"No artifact matched '{self.spec.artifact_glob}' under {self.source_path}. "
-                f"Check that the build succeeded."
+                f"No artifact matched '{self.spec.artifact_glob}' under {self.source_path}.\n"
+                f"Large files found (possible binaries): {bin_contents}"
             )
         artifact = artifacts[0]
         if len(artifacts) > 1:
             logger.warning(f"[GenericBuildMgr] Multiple artifacts matched, using {artifact.name}")
 
-        base_image = self.spec.resolved_base_image(self.version)
+        base_image = self._resolve_base_image()
         artifact_dest = self.spec.resolved_artifact_dest(self.version)
         build_ctx = Path(tempfile.mkdtemp(prefix=f"sregym-{self.spec.name}-docker-"))
         try:
@@ -162,6 +264,40 @@ class GenericDBBuildManager:
             logger.info(f"[GenericBuildMgr] Image built: {image_tag}")
         finally:
             shutil.rmtree(build_ctx, ignore_errors=True)
+
+    def _resolve_base_image(self) -> str:
+        """Return the base image for the Docker build.
+
+        Uses the version-specific image from the spec if it exists on Docker Hub.
+        Falls back to the runtime base from the source tree's own Dockerfile so
+        that pre-release versions (e.g. v9.0.0-dev) still build correctly.
+        """
+        candidate = self.spec.resolved_base_image(self.version)
+        check = subprocess.run(
+            f"docker manifest inspect {candidate}",
+            shell=True, capture_output=True,
+        )
+        if check.returncode == 0:
+            return candidate
+
+        # Parse the runtime FROM from the source Dockerfile (last non-builder FROM)
+        dockerfile = self.source_path / "Dockerfile"
+        if dockerfile.exists():
+            froms = [
+                line.split()[1]
+                for line in dockerfile.read_text().splitlines()
+                if line.strip().upper().startswith("FROM") and " as builder" not in line.lower()
+            ]
+            if froms:
+                logger.info(
+                    f"[GenericBuildMgr] Base image {candidate!r} not found — "
+                    f"falling back to source Dockerfile base: {froms[-1]!r}"
+                )
+                return froms[-1]
+
+        raise RuntimeError(
+            f"Base image {candidate!r} not found on Docker Hub and no Dockerfile fallback available."
+        )
 
     # ── Cluster image distribution ────────────────────────────────────────────
     # Same three-strategy fallback as CassandraBuildManager:
@@ -318,7 +454,12 @@ spec:
     def _hash_dir(directory: Path) -> str:
         h = hashlib.sha256()
         for f in sorted(directory.rglob("*")):
-            if f.is_file():
-                h.update(str(f.relative_to(directory)).encode())
-                h.update(f.read_bytes())
+            if f.is_symlink():
+                continue  # skip symlinks — build-created symlinks aren't source
+            try:
+                if f.is_file():
+                    h.update(str(f.relative_to(directory)).encode())
+                    h.update(f.read_bytes())
+            except (PermissionError, OSError):
+                pass
         return h.hexdigest()

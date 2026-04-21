@@ -24,7 +24,7 @@ import urllib.request
 
 from sregym.service.db_build_spec import DB_REGISTRY, DBBuildSpec
 from sregym.service.github_issue_parser import ParsedIssue
-from sregym.service.reproducer_extractor import extract_reproducer
+from sregym.service.reproducer_extractor import extract_reproducer_full
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +53,17 @@ class JiraIssueParser:
 
         version = self._extract_version(fields, title, body)
         git_ref = spec.git_ref(version)
-        reproducer = extract_reproducer(body)
-        if reproducer:
-            logger.info(f"[JiraParser] Extracted reproducer ({len(reproducer)} chars)")
+        reproducer, expected_output, buggy_output, correct_output, crash_on_startup = (
+            extract_reproducer_full(body)
+        )
+        if reproducer or crash_on_startup:
+            logger.info(
+                f"[JiraParser] Extracted reproducer ({len(reproducer) if reproducer else 0} chars)"
+                + (f", expected_output={expected_output!r}" if expected_output else "")
+                + (f", buggy_output={buggy_output!r}" if buggy_output else "")
+                + (f", correct_output={correct_output!r}" if correct_output else "")
+                + (", crash_on_startup=True" if crash_on_startup else "")
+            )
 
         logger.info(
             f"[JiraParser] {self.issue_url} → db={spec.name} "
@@ -69,6 +77,10 @@ class JiraIssueParser:
             title=title,
             body=body,
             reproducer=reproducer,
+            expected_output=expected_output,
+            crash_on_startup=crash_on_startup,
+            buggy_output=buggy_output,
+            correct_output=correct_output,
         )
 
     # ── Version extraction ────────────────────────────────────────────────────

@@ -48,23 +48,24 @@ class GenericDBApplication:
         spec: DBBuildSpec,
         version: str,
         cluster_name: str | None = None,
+        initial_image: str | None = None,
     ):
         self.spec = spec
         self.version = version
         self.cluster_name = cluster_name or spec.default_cluster_name
-        # CR and operator share the operator namespace (mirrors Cassandra behaviour).
         self.namespace = spec.operator_namespace
         self.name = spec.name
+        self.initial_image = initial_image
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def deploy(self):
-        """Install operator + deploy stock cluster, wait for it to be ready."""
+        """Install operator + deploy cluster, wait for it to be ready."""
         logger.info(f"Deploying {self.spec.name} {self.version} via {self.spec.operator_chart}")
         if self.spec.prereqs_fn:
             self.spec.prereqs_fn()
         self._install_operator()
-        self._deploy_cluster(custom_image=None)
+        self._deploy_cluster(custom_image=self.initial_image)
         self._wait_for_cluster_ready()
         logger.info(f"{self.spec.name} cluster deployed")
 
@@ -85,6 +86,44 @@ class GenericDBApplication:
         logger.info("Image patched — waiting for rolling restart")
         self._wait_for_image_rollout(image_tag)
         logger.info(f"Cluster ready with image: {image_tag}")
+
+    def restore_stock_image(self, custom_image: str | None = None):
+        """Patch the cluster back to the stock image and wait for all pods to be Ready.
+
+        Scales the operator back up first in case it was scaled down during fault injection.
+        Passes custom_image as the 'from' image for the StatefulSet override fallback so
+        containers running the buggy image are correctly identified and replaced.
+        """
+        stock_image = self.spec.resolved_base_image(self.version)
+        logger.info(f"[GenericDBApp] Restoring {self.spec.name} cluster to stock image: {stock_image}")
+        self._scale_operator_up()
+        time.sleep(5)
+
+        patch = self.spec.image_patch_fn(self.cluster_name, self.namespace, stock_image)
+        _run(
+            f"kubectl patch {self.spec.cr_kind} {self.cluster_name} "
+            f"-n {self.namespace} --type=merge -p '{json.dumps(patch)}'"
+        )
+        self._wait_for_image_rollout(stock_image, from_image=custom_image)
+        # Re-scale operator up in case the fallback override scaled it down during rollout
+        self._scale_operator_up()
+        logger.info(f"[GenericDBApp] Cluster restored to stock image: {stock_image}")
+
+    def inject_buggy_image_expect_crash(self, image_tag: str, timeout: int = 300):
+        """Swap to the buggy image and wait for pods to enter CrashLoopBackOff.
+
+        Used for startup-crash bugs where the new binary fails during bootstrap.
+        Applies the same operator-override fallback as inject_buggy_image() so
+        the image actually reaches the pods even if the operator stalls.
+        """
+        patch = self.spec.image_patch_fn(self.cluster_name, self.namespace, image_tag)
+        patch_json = json.dumps(patch)
+        logger.info(f"Swapping {self.spec.name} cluster to image: {image_tag} (expecting startup crash)")
+        _run(
+            f"kubectl patch {self.spec.cr_kind} {self.cluster_name} "
+            f"-n {self.namespace} --type=merge -p '{patch_json}'"
+        )
+        self._wait_for_crash_loop(image_tag, timeout)
 
     def cleanup(self):
         """Delete cluster CR, namespaces, leftover PVs, and the operator."""
@@ -129,16 +168,17 @@ class GenericDBApplication:
         else:
             logger.warning(f"No run_reproducer_fn defined for {self.spec.name} — skipping")
 
-    def deploy_continuous_reproducer(self, reproducer: str):
+    def deploy_continuous_reproducer(self, reproducer: str, expected_output: str | None = None):
         """Deploy a Deployment on the cluster that runs the reproducer in a loop."""
         if not self.spec.reproducer_workload_fn:
             logger.warning(f"No reproducer_workload_fn for {self.spec.name} — skipping continuous workload")
             return
-        manifest = self.spec.reproducer_workload_fn(self.cluster_name, self.namespace, reproducer)
+        manifest = self.spec.reproducer_workload_fn(self.cluster_name, self.namespace, reproducer, expected_output)
         _run("kubectl apply -f -", input=manifest)
         logger.info(
             f"Continuous reproducer workload '{self.cluster_name}-reproducer' "
             f"deployed in '{self.namespace}'"
+            + (f" (checking for expected_output={expected_output!r})" if expected_output else "")
         )
 
     def start_workload(self):
@@ -253,7 +293,21 @@ class GenericDBApplication:
             f"pods to be Ready in '{self.namespace}'"
         )
 
-    def _wait_for_image_rollout(self, image_tag: str, timeout: int = 600):
+    def _scale_operator_up(self):
+        """Scale every operator Deployment back to 1 replica."""
+        deps_out = subprocess.run(
+            f"kubectl get deployments -n {self.spec.operator_namespace} "
+            f"--no-headers -o jsonpath='{{range .items[*]}}{{.metadata.name}} {{end}}' 2>/dev/null",
+            shell=True, capture_output=True, text=True,
+        )
+        for dep in deps_out.stdout.strip().split():
+            logger.info(f"[GenericDBApp] Scaling up operator deployment '{dep}'")
+            subprocess.run(
+                f"kubectl scale deployment {dep} -n {self.spec.operator_namespace} --replicas=1",
+                shell=True, capture_output=True,
+            )
+
+    def _wait_for_image_rollout(self, image_tag: str, timeout: int = 600, from_image: str | None = None):
         """Wait until at least one pod in the namespace runs image_tag and is Ready.
 
         Gives the operator up to 30 s to propagate the CR change on its own.
@@ -292,7 +346,7 @@ class GenericDBApplication:
                     "Operator did not propagate image change — "
                     "falling back to direct StatefulSet override"
                 )
-                self._operator_override(image_tag)
+                self._operator_override(image_tag, from_image=from_image)
                 override_attempted = True
 
             time.sleep(15)
@@ -300,6 +354,62 @@ class GenericDBApplication:
         raise RuntimeError(
             f"Timeout ({timeout}s) waiting for image '{image_tag}' "
             f"to roll out in '{self.namespace}'"
+        )
+
+    def _wait_for_crash_loop(self, image_tag: str, timeout: int = 300):
+        """Wait until a pod running image_tag enters CrashLoopBackOff or exits non-zero.
+
+        Applies the same operator-override fallback as _wait_for_image_rollout so
+        the new image actually reaches pods even when the operator stalls.
+        """
+        import json as _json
+        logger.info(
+            f"Waiting for crash-loop on image '{image_tag}' "
+            f"in '{self.namespace}' (up to {timeout}s)…"
+        )
+        override_attempted = False
+        deadline = time.time() + timeout
+        operator_wait = time.time() + 30
+
+        while time.time() < deadline:
+            if self._any_pod_has_image(image_tag):
+                out = subprocess.run(
+                    f"kubectl get pods -n {self.namespace} -o json 2>/dev/null",
+                    shell=True, capture_output=True, text=True,
+                )
+                try:
+                    data = _json.loads(out.stdout)
+                    for pod in data.get("items", []):
+                        for cs in pod.get("status", {}).get("containerStatuses", []):
+                            if image_tag not in cs.get("image", ""):
+                                continue
+                            waiting_reason = cs.get("state", {}).get("waiting", {}).get("reason", "")
+                            exit_code = cs.get("state", {}).get("terminated", {}).get("exitCode")
+                            if waiting_reason in ("CrashLoopBackOff", "Error") or (
+                                exit_code is not None and exit_code != 0
+                            ):
+                                pod_name = pod["metadata"]["name"]
+                                logger.info(
+                                    f"Startup crash confirmed on pod '{pod_name}': "
+                                    f"reason={waiting_reason or 'exit'} exitCode={exit_code}"
+                                )
+                                return
+                except Exception:
+                    pass
+
+            if not override_attempted and time.time() > operator_wait:
+                logger.info(
+                    "Operator did not propagate image change — "
+                    "falling back to direct StatefulSet override"
+                )
+                self._operator_override(image_tag)
+                override_attempted = True
+
+            time.sleep(10)
+
+        raise RuntimeError(
+            f"Timeout ({timeout}s) waiting for crash-loop on image '{image_tag}' "
+            f"in '{self.namespace}'"
         )
 
     def _any_pod_has_image(self, image_tag: str) -> bool:
@@ -327,9 +437,13 @@ class GenericDBApplication:
                 return pod_name
         return None
 
-    def _operator_override(self, image_tag: str):
-        """Scale down all operator Deployments, then directly patch StatefulSets."""
-        # Scale down every Deployment in the operator namespace.
+    def _operator_override(self, image_tag: str, from_image: str | None = None):
+        """Scale down all operator Deployments, then directly patch StatefulSets.
+
+        from_image: the image currently running in pods (used for container matching).
+        Defaults to the stock base image (fault-inject direction); pass the custom image
+        for recovery (stock-restore direction).
+        """
         deps_out = subprocess.run(
             f"kubectl get deployments -n {self.spec.operator_namespace} "
             f"--no-headers -o jsonpath='{{range .items[*]}}{{.metadata.name}} {{end}}' 2>/dev/null",
@@ -343,20 +457,21 @@ class GenericDBApplication:
             )
         time.sleep(5)
 
-        # Patch every StatefulSet in the cluster namespace.
-        base_image = self.spec.resolved_base_image(self.version)
+        match_image = from_image if from_image is not None else self.spec.resolved_base_image(self.version)
         sts_out = subprocess.run(
             f"kubectl get statefulsets -n {self.namespace} --no-headers "
             f"-o jsonpath='{{range .items[*]}}{{.metadata.name}} {{end}}' 2>/dev/null",
             shell=True, capture_output=True, text=True,
         )
         for sts in sts_out.stdout.strip().split():
-            self._patch_statefulset(sts, base_image, image_tag)
+            self._patch_statefulset(sts, match_image, image_tag)
 
-    def _patch_statefulset(self, sts_name: str, base_image: str, image_tag: str):
-        """Reset partition to 0 and replace base-image containers with image_tag."""
-        # Find containers whose image matches the base image (exact or prefix).
-        base_repo = base_image.split(":")[0]
+    def _patch_statefulset(self, sts_name: str, base_image: str | None, image_tag: str):
+        """Reset partition to 0 and replace matching containers with image_tag.
+
+        base_image: image currently on the containers to replace. None means patch all containers.
+        """
+        base_repo = base_image.split(":")[0] if base_image else None
         ctrs_out = subprocess.run(
             f"kubectl get statefulset {sts_name} -n {self.namespace} "
             f"-o jsonpath='{{range .spec.template.spec.containers[*]}}{{.name}} {{.image}}|{{end}}' "
@@ -371,12 +486,12 @@ class GenericDBApplication:
             parts = entry.split(" ", 1)
             if len(parts) == 2:
                 ctr_name, ctr_image = parts
-                if base_repo in ctr_image or ctr_image == base_image:
+                if base_repo is None or base_repo in ctr_image or ctr_image == base_image:
                     containers_to_patch.append({"name": ctr_name, "image": image_tag})
 
         if not containers_to_patch:
             logger.warning(
-                f"No containers matching '{base_repo}' found in StatefulSet '{sts_name}' — "
+                f"No containers matching '{base_repo or 'any'}' found in StatefulSet '{sts_name}' — "
                 "skipping image patch, resetting partition only"
             )
 

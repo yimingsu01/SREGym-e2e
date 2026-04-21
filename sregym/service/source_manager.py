@@ -40,8 +40,14 @@ class SourceManager:
         source_dir = self.cache_dir / f"{name}-{safe_ref}"
 
         if source_dir.exists() and (source_dir / ".git").exists():
-            logger.info(f"Source already cached at {source_dir}")
-            return source_dir
+            r = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(source_dir), capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                logger.info(f"Source already cached at {source_dir}")
+                return source_dir
+            logger.warning(f"Incomplete checkout at {source_dir} — re-cloning")
 
         source_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Cloning {repo_url} at ref '{git_ref}' into {source_dir}...")
@@ -57,26 +63,52 @@ class SourceManager:
             logger.info(f"Shallow clone successful at {source_dir}")
             return source_dir
 
-        # If that failed (e.g. ref is a commit SHA), do a full clone + checkout
-        logger.info(f"Shallow clone failed for ref '{git_ref}', falling back to full clone...")
-        # Clean up failed shallow clone
-        subprocess.run(["rm", "-rf", str(source_dir)], check=True)
-        source_dir.mkdir(parents=True, exist_ok=True)
+        # Shallow clone failed (e.g. ref is a commit SHA, not a branch/tag).
+        # Fall back to fetch + checkout in-place — avoids deleting root-owned
+        # build artifacts that docker run may have created inside the directory.
+        logger.info(f"Shallow clone failed for ref '{git_ref}', falling back to fetch + checkout...")
+
+        if not (source_dir / ".git").exists():
+            subprocess.run(
+                ["git", "init", str(source_dir)],
+                check=True, capture_output=True, text=True,
+            )
+            subprocess.run(
+                ["git", "remote", "add", "origin", repo_url],
+                cwd=str(source_dir),
+                check=True, capture_output=True, text=True,
+            )
+
+        # GitHub rejects `git fetch --depth=1 origin <SHA>` for arbitrary commits.
+        # Try a partialclone filter first (works on GitHub), then fall back to a
+        # full unshallow fetch which is slow but always succeeds.
+        fetched = False
+        for fetch_args in (
+            ["--depth=1", "--filter=blob:none", git_ref],
+            ["--depth=1", git_ref],
+            [git_ref],
+        ):
+            r = subprocess.run(
+                ["git", "fetch", "origin"] + fetch_args,
+                cwd=str(source_dir),
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0:
+                fetched = True
+                break
+
+        if not fetched:
+            raise RuntimeError(
+                f"Could not fetch ref '{git_ref}' from {repo_url}. "
+                f"Last error: {r.stderr.strip()}"
+            )
 
         subprocess.run(
-            ["git", "clone", repo_url, str(source_dir)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "checkout", git_ref],
+            ["git", "checkout", "FETCH_HEAD"],
             cwd=str(source_dir),
-            check=True,
-            capture_output=True,
-            text=True,
+            check=True, capture_output=True, text=True,
         )
-        logger.info(f"Full clone + checkout successful at {source_dir}")
+        logger.info(f"Fetch + checkout successful at {source_dir}")
         return source_dir
 
     def reset_source(self, source_dir: Path) -> None:

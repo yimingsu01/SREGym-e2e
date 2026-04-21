@@ -80,11 +80,19 @@ class DBBuildSpec:
 
     # Returns a Kubernetes manifest (ConfigMap + Deployment) that continuously
     # runs the reproducer on the cluster so the bug stays observable.
-    # Called as: reproducer_workload_fn(cluster_name, namespace, reproducer) → str
-    reproducer_workload_fn: Callable[[str, str, str], str] | None = field(default=None)
+    # Called as: reproducer_workload_fn(cluster_name, namespace, reproducer, expected_output) → str
+    # expected_output: correct value for wrong-result bugs; None for error/crash bugs.
+    reproducer_workload_fn: Callable[[str, str, str, str | None], str] | None = field(default=None)
 
     # Extra --set / --values flags appended to the Helm operator install command.
     operator_extra_helm_args: str = field(default="")
+
+    # Skip source compile and produce a custom image that just re-tags the stock
+    # base image.  Use this when the source tree cannot be compiled standalone
+    # (e.g. MongoDB 8.0+ public repo unconditionally references a private
+    # enterprise modules repo) but the bug is already present in the stock
+    # binary.  build_cmd / artifact_glob / artifact_dest are ignored in this mode.
+    prebuilt_from_stock: bool = field(default=False)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -306,12 +314,14 @@ def _tidb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> 
     svc = f"{cluster_name}-tidb.{namespace}.svc.cluster.local"
     pod = "tidb-sql-client"
 
-    # Ensure the reproducer runs inside a database context.
-    if not any(
-        keyword in reproducer.upper()
-        for keyword in ("USE ", "CREATE DATABASE", "CREATE SCHEMA")
-    ):
-        reproducer = "CREATE DATABASE IF NOT EXISTS sregym_test;\nUSE sregym_test;\n" + reproducer
+    # Wrap reproducer in a fresh temp database to avoid table-exists errors and
+    # DROP DATABASE IF EXISTS raising ERROR 1008 on TiDB when DB doesn't exist.
+    db_name = "sregym_oneshot"
+    reproducer = (
+        f"CREATE DATABASE IF NOT EXISTS `{db_name}`;\n"
+        f"USE `{db_name}`;\n"
+        + reproducer
+    )
 
     log.info("[Reproducer] Running TiDB SQL reproducer")
     try:
@@ -426,44 +436,218 @@ spec:
         - |
           {loop_cmd}{probe_yaml}
       restartPolicy: Always
+
 """
 
 
-def _tidb_reproducer_workload(cluster_name: str, namespace: str, reproducer: str) -> str:
-    # Always prepend a fresh database for each iteration so CREATE TABLE etc. don't fail.
-    reproducer = "DROP DATABASE IF EXISTS sregym_test;\nCREATE DATABASE sregym_test;\nUSE sregym_test;\n" + reproducer
+def _tidb_reproducer_workload(
+    cluster_name: str, namespace: str, reproducer: str, expected_output: str | None = None
+) -> str:
+    # run.sql holds the raw reproducer; the shell loop prepends DB setup so we
+    # never run DROP DATABASE (which raises ERROR 1008 on TiDB even with IF EXISTS).
+    # A timestamped DB name avoids table-already-exists errors between iterations.
     svc = f"{cluster_name}-tidb.{namespace}.svc.cluster.local"
+    mysql = f"mysql -h {svc} -P 4000 -u root --connect-timeout=15"
     loop_cmd = (
         "while true; do "
-        f"mysql -h {svc} -P 4000 -u root --connect-timeout=15 < /scripts/run.sql 2>&1 || true; "
+                'DB=sregym_$(date +%s); '
+        # printf preamble → cat script → pipe to mysql; no backtick quoting needed
+        # for sregym_<timestamp> identifiers
+        f'out=$(printf "SET GLOBAL tidb_mem_quota_query=0;\\nSET SESSION max_execution_time=15000;\\nCREATE DATABASE $DB;\\nUSE $DB;\\n" | cat - /scripts/run.sql | timeout 30 {mysql} --table 2>&1); '
+        'rc=$?; if [ -n "$out" ]; then echo "$out"; else echo "(empty result set)"; fi; '
+        f'mysql -h {svc} -P 4000 -u root --connect-timeout=5 -e "DROP DATABASE $DB" > /dev/null 2>&1 || true; '
         "sleep 10; done"
     )
-    # Run the reproducer; exit 0 if the DB is reachable (MySQL error 2xxx =
-    # connection failure), exit 1 only when we can't connect at all.
-    probe_script = (
-        "#!/bin/sh\n"
-        f"out=$(mysql -h {svc} -P 4000 -u root --connect-timeout=5 < /scripts/run.sql 2>&1) || true\n"
-        "echo \"$out\" | grep -qE 'ERROR 2[0-9][0-9][0-9]' && exit 1\n"
-        "exit 0\n"
-    )
+    if expected_output:
+        safe = expected_output.replace("'", "'\\''")
+        probe_script = (
+            "#!/bin/sh\n"
+            "DB=sregym_probe\n"
+            f'mysql -h {svc} -P 4000 -u root --connect-timeout=5 -e "CREATE DATABASE IF NOT EXISTS $DB" > /dev/null 2>&1\n'
+            f'out=$(printf "USE $DB;\\n" | cat - /scripts/run.sql | {mysql} --batch --skip-column-names 2>/dev/null)\n'
+            f"printf '%s' \"$out\" | grep -qF '{safe}' && exit 0\n"
+            "exit 1\n"
+        )
+    else:
+        probe_script = (
+            "#!/bin/sh\n"
+            "DB=sregym_probe_$(date +%s)\n"
+            f'printf "CREATE DATABASE $DB;\\nUSE $DB;\\n" | cat - /scripts/run.sql | {mysql} > /dev/null 2>&1\n'
+            "rc=$?\n"
+            f'mysql -h {svc} -P 4000 -u root --connect-timeout=5 -e "DROP DATABASE $DB" > /dev/null 2>&1 || true\n'
+            "exit $rc\n"
+        )
     return _workload_manifest(cluster_name, namespace, "mysql:8.0", loop_cmd, reproducer, "run.sql", probe_script)
 
 
-def _cassandra_reproducer_workload(cluster_name: str, namespace: str, reproducer: str) -> str:
+def _mongodb_image_patch(_cluster: str, _ns: str, image: str) -> dict:  # type: ignore[override]
+    return {
+        "spec": {
+            "statefulSet": {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [{"name": "mongod", "image": image}]
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+def _mongodb_cluster_manifest(
+    cluster_name: str,
+    namespace: str,
+    version: str,
+    custom_image: str | None,
+) -> str:
+    custom_image_override = (
+        f"\n        spec:\n          containers:\n          - name: mongod\n            image: \"{custom_image}\""
+        if custom_image else ""
+    )
+    return f"""\
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongodb-admin-password
+  namespace: {namespace}
+type: Opaque
+stringData:
+  password: sregym-test-pass
+---
+apiVersion: mongodbcommunity.mongodb.com/v1
+kind: MongoDBCommunity
+metadata:
+  name: {cluster_name}
+  namespace: {namespace}
+spec:
+  members: 1
+  type: ReplicaSet
+  version: "{version}"
+  security:
+    authentication:
+      modes: ["SCRAM"]
+  users:
+    - name: admin
+      db: admin
+      passwordSecretRef:
+        name: mongodb-admin-password
+      roles:
+        - name: clusterAdmin
+          db: admin
+        - name: userAdminAnyDatabase
+          db: admin
+        - name: readWriteAnyDatabase
+          db: admin
+      scramCredentialsSecretName: mongodb-admin-scram
+  statefulSet:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/instance: {cluster_name}{custom_image_override}
+"""
+
+
+def _mongodb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> None:
+    import subprocess
+    import logging
+    log = logging.getLogger(__name__)
+    svc = f"{cluster_name}-svc.{namespace}.svc.cluster.local"
+    conn = (
+        f"mongodb://admin:sregym-test-pass@{svc}:27017/admin"
+        f"?authSource=admin&replicaSet={cluster_name}"
+    )
+    pod = "mongodb-mongosh-client"
+
+    log.info("[Reproducer] Running MongoDB reproducer")
+    try:
+        subprocess.run(
+            f"kubectl delete pod {pod} -n {namespace} --ignore-not-found",
+            shell=True, capture_output=True,
+        )
+        subprocess.run(
+            f"kubectl run {pod} --image=mongo:6 --restart=Never -n {namespace} -- sleep 3600",
+            shell=True, check=True, capture_output=True,
+        )
+        subprocess.run(
+            f"kubectl wait pod/{pod} -n {namespace} --for=condition=Ready --timeout=120s",
+            shell=True, check=True, capture_output=True,
+        )
+        result = subprocess.run(
+            f"kubectl exec -i {pod} -n {namespace} -- mongosh '{conn}' --quiet",
+            shell=True, input=reproducer,
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            log.info(f"[Reproducer] Output: {result.stdout.strip()[:200]}")
+        else:
+            log.info(f"[Reproducer] mongosh exited {result.returncode}: {result.stderr.strip()[:300]}")
+    except Exception as e:
+        log.warning(f"[Reproducer] Error: {e}")
+    finally:
+        subprocess.run(
+            f"kubectl delete pod {pod} -n {namespace} --ignore-not-found --wait=false",
+            shell=True, capture_output=True,
+        )
+
+
+def _mongodb_reproducer_workload(
+    cluster_name: str, namespace: str, reproducer: str, expected_output: str | None
+) -> str:
+    svc = f"{cluster_name}-svc.{namespace}.svc.cluster.local"
+    conn = (
+        f"mongodb://admin:sregym-test-pass@{svc}:27017/admin"
+        f"?authSource=admin&replicaSet={cluster_name}"
+    )
+    loop_cmd = (
+        "while true; do "
+                f"out=$(mongosh '{conn}' --quiet < /scripts/run.js 2>&1); "
+        'rc=$?; [ -n "$out" ] && echo "$out"; '
+        "sleep 10; done"
+    )
+    if expected_output:
+        safe = expected_output.replace("'", "'\\''")
+        probe_script = (
+            "#!/bin/sh\n"
+            f"out=$(mongosh '{conn}' --quiet < /scripts/run.js 2>/dev/null)\n"
+            f"printf '%s' \"$out\" | grep -qF '{safe}' && exit 0\n"
+            "exit 1\n"
+        )
+    else:
+        probe_script = (
+            "#!/bin/sh\n"
+            f"mongosh '{conn}' --quiet < /scripts/run.js > /dev/null 2>&1\n"
+        )
+    return _workload_manifest(cluster_name, namespace, "mongo:6", loop_cmd, reproducer, "run.js", probe_script)
+
+
+def _cassandra_reproducer_workload(
+    cluster_name: str, namespace: str, reproducer: str, expected_output: str | None = None
+) -> str:
     svc = f"{cluster_name}-dc1-service.{namespace}.svc.cluster.local"
     loop_cmd = (
         "while true; do "
-        f"cqlsh {svc} < /scripts/run.cql 2>&1 || true; "
+                f"out=$(cqlsh {svc} < /scripts/run.cql 2>&1); "
+        'rc=$?; [ -n "$out" ] && echo "$out"; '
         "sleep 10; done"
     )
-    # Run the reproducer; exit 1 only on connection errors (grep for known
-    # cqlsh connection failure strings), exit 0 for any SQL-level error (the bug).
-    probe_script = (
-        "#!/bin/sh\n"
-        f"out=$(cqlsh {svc} < /scripts/run.cql 2>&1) || true\n"
-        "echo \"$out\" | grep -qiE 'Connection refused|Unable to connect|NoHostAvailable' && exit 1\n"
-        "exit 0\n"
-    )
+    if expected_output:
+        safe = expected_output.replace("'", "'\\''")
+        probe_script = (
+            "#!/bin/sh\n"
+            f"out=$(cqlsh {svc} --no-color < /scripts/run.cql 2>/dev/null)\n"
+            f"printf '%s' \"$out\" | grep -qF '{safe}' && exit 0\n"
+            "exit 1\n"
+        )
+    else:
+        # Error/crash bug: Ready = query runs without error (bug fixed).
+        # Not Ready = query errors (bug active) or DB unreachable.
+        probe_script = (
+            "#!/bin/sh\n"
+            f"cqlsh {svc} < /scripts/run.cql > /dev/null 2>&1\n"
+        )
     return _workload_manifest(cluster_name, namespace, "cassandra:4.1", loop_cmd, reproducer, "run.cql", probe_script)
 
 
@@ -501,9 +685,9 @@ DB_REGISTRY: dict[str, DBBuildSpec] = {
         repo_url="https://github.com/pingcap/tidb",
         github_repo="pingcap/tidb",
         version_tag_pattern="v{version}",
-        build_image="golang:1.21",
-        build_cmd="GOFLAGS=-buildvcs=false make server",
-        artifact_glob="bin/tidb-server",
+        build_image="golang:1.23",
+        build_cmd="GOFLAGS=-buildvcs=false make server || make tidb-server || make build",
+        artifact_glob="bin/tidb-server*",
         base_image="pingcap/tidb:v{version}",
         artifact_dest="/tidb-server",
         operator_helm_repo="pingcap",
@@ -527,5 +711,41 @@ DB_REGISTRY: dict[str, DBBuildSpec] = {
             "--set admissionWebhook.create=false "
             "--set scheduler.create=false"
         ),
+    ),
+    "mongodb": DBBuildSpec(
+        name="mongodb",
+        repo_url="https://github.com/mongodb/mongo",
+        github_repo="mongodb/mongo",
+        # MongoDB release tags use "r" prefix: r7.0.5, r6.0.10, etc.
+        version_tag_pattern="r{version}",
+        # build_image / build_cmd / artifact_glob / artifact_dest are not used
+        # when prebuilt_from_stock=True.  Kept as placeholders for the schema.
+        build_image="ubuntu:22.04",
+        build_cmd="true",
+        artifact_glob="UNUSED",
+        base_image="mongodb/mongodb-community-server:{version}-ubi8",
+        artifact_dest="/usr/bin/mongod",
+        # The mongo public source at 8.0+ cannot be built standalone:
+        #   • src/BUILD.bazel:10 (core_headers_library) unconditionally references
+        #     //src/mongo/db/modules/enterprise/... which lives in a private repo.
+        #   • .bazelrc pins build_enterprise=True in every profile.
+        #   • SCons is mid-migration and fails on murmurhash3/s2/snappy/tcmalloc.
+        # Community jira bugs like SERVER-110803 exist in the published stock
+        # image (e.g. mongodb/mongodb-community-server:8.0.13-ubi8), so the
+        # "custom" image can simply wrap the stock one — the buggy binary is
+        # already there.  The source tree is still cloned for static analysis
+        # by diagnosis oracles.
+        prebuilt_from_stock=True,
+        operator_helm_repo="mongodb",
+        operator_helm_repo_url="https://mongodb.github.io/helm-charts",
+        operator_chart="mongodb/community-operator",
+        operator_namespace="mongodb-operator",
+        default_cluster_name="sregym-mongodb",
+        cr_kind="mongodbcommunity",
+        cluster_manifest_fn=_mongodb_cluster_manifest,
+        image_patch_fn=_mongodb_image_patch,
+        jira_project="SERVER",
+        run_reproducer_fn=_mongodb_run_reproducer,
+        reproducer_workload_fn=_mongodb_reproducer_workload,
     ),
 }

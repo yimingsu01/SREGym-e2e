@@ -77,6 +77,7 @@ from sregym.conductor.problems.wrong_dns_policy import WrongDNSPolicy
 from sregym.conductor.problems.wrong_service_selector import WrongServiceSelector
 from sregym.service.kubectl import KubeCtl
 from sregym.conductor.problems.auto_tidb_67650 import AutoTidb67650
+from sregym.conductor.problems.auto_tidb_67002 import AutoTidb67002
 
 
 # fmt: off
@@ -275,6 +276,7 @@ class ProblemRegistry:
             "operator_wrong_operator_image": K8SOperatorWrongOperatorImage,
             # AUTOMATIC
             "auto_tidb_67650": AutoTidb67650,
+            "auto_tidv_67002": AutoTidb67002,
         }
 # fmt: on
         self.kubectl = KubeCtl()
