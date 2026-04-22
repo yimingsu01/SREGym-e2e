@@ -49,24 +49,72 @@ logger = logging.getLogger(__name__)
 
 
 def _nearest_released_version(spec, version: str) -> str:
-    """Return version if its Docker image exists, otherwise the latest released version."""
+    """Return version if its Docker image exists, otherwise the nearest released
+    version on the same repo (preferring same MAJOR.MINOR, else latest stable).
+
+    Handles the common case where the issue parser extracts a partial version
+    (e.g. ``25.2`` when Docker Hub only publishes ``v25.2.0`` … ``v25.2.17``) or
+    a pre-release that hasn't been tagged yet.
+    """
     import subprocess as _sp
     candidate = spec.resolved_base_image(version)
     ok = _sp.run(f"docker manifest inspect {candidate}", shell=True, capture_output=True)
     if ok.returncode == 0:
         return version
-    logger.warning(f"[GenericCustomBuild] {candidate!r} not on Docker Hub — querying for latest release")
+
+    # Everything before the `:` in the base_image template is the Docker Hub
+    # repo. Works for cockroachdb/cockroach, pingcap/tidb,
+    # k8ssandra/cass-management-api, mongodb/mongodb-community-server, etc.
+    repo = spec.base_image.split(":", 1)[0]
+    logger.warning(
+        f"[GenericCustomBuild] {candidate!r} not on Docker Hub — "
+        f"querying {repo!r} tags for nearest match"
+    )
     try:
         import urllib.request as _ur, json as _js
-        url = f"https://registry.hub.docker.com/v2/repositories/pingcap/{spec.name}/tags?page_size=50&ordering=last_updated"
+        url = (
+            f"https://registry.hub.docker.com/v2/repositories/{repo}"
+            f"/tags?page_size=100&ordering=last_updated"
+        )
         with _ur.urlopen(url, timeout=10) as r:
             tags = [t["name"] for t in _js.loads(r.read())["results"]]
-        stable = [t.lstrip("v") for t in tags if re.fullmatch(r"v\d+\.\d+\.\d+", t)]
-        if stable:
-            return stable[0]
     except Exception as e:
-        logger.warning(f"[GenericCustomBuild] Docker Hub query failed: {e}")
-    return version
+        logger.warning(f"[GenericCustomBuild] Docker Hub tag query failed: {e}")
+        return version
+
+    # Tags can be v1.2.3, 1.2.3-ubi8, r1.2.3-fips, etc. — extract the bare
+    # semver. No `\b` anchor at the start: `v` is a word-char, so `\bv26…`
+    # would have no boundary before `26` and the match would fail.
+    def _bare_semver(tag: str) -> str | None:
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", tag)
+        return ".".join(m.groups()) if m else None
+
+    semvers = sorted(
+        {v for v in (_bare_semver(t) for t in tags) if v},
+        key=lambda v: tuple(int(x) for x in v.split(".")),
+        reverse=True,
+    )
+    if not semvers:
+        return version
+
+    parts = version.split(".")
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        prefix = f"{parts[0]}.{parts[1]}."
+        same_minor = [v for v in semvers if v.startswith(prefix)]
+        if same_minor:
+            resolved = same_minor[0]
+            logger.info(
+                f"[GenericCustomBuild] Resolved {version!r} → {resolved!r} "
+                f"(newest same-minor release on {repo})"
+            )
+            return resolved
+
+    resolved = semvers[0]
+    logger.info(
+        f"[GenericCustomBuild] Resolved {version!r} → {resolved!r} "
+        f"(latest stable on {repo}; no same-minor tag available)"
+    )
+    return resolved
 
 
 def _version_from_source(source_path: Path, spec) -> str | None:
@@ -164,7 +212,11 @@ class GenericCustomBuildProblem(Problem):
                 f"deploying stock cluster at {deploy_version!r}"
             )
 
-        build_mgr = GenericDBBuildManager(spec, source_path, version)
+        # Build manager uses its version to pull the stock base image — must be
+        # a real Docker Hub tag, not the partial/pre-release version from the
+        # issue. Source tree already checked out at git_ref, so the buggy code
+        # is preserved regardless of which stock tag we stack it on top of.
+        build_mgr = GenericDBBuildManager(spec, source_path, deploy_version)
         if self.patch_dir is not None:
             self._custom_image = build_mgr.build_with_patches(Path(self.patch_dir))
         else:

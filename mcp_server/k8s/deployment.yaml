@@ -27,7 +27,7 @@ spec:
       containers:
         - name: mcp-server
           image: sregym:latest
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 9954

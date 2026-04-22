@@ -48,6 +48,9 @@ def validate_reproducer(
     if spec.name == "mongodb":
         return _validate_mongodb(spec, version, reproducer, buggy_output, correct_output)
 
+    if spec.name == "cockroachdb":
+        return _validate_cockroachdb(spec, version, reproducer, buggy_output, correct_output)
+
     return ValidationResult(
         False, skipped=True, reason=f"reproducer validation not implemented for db={spec.name!r}",
     )
@@ -106,7 +109,7 @@ def _validate_mongodb(
             f"[ReproducerValidator] reproducer output (rc={exec_r.returncode}, "
             f"{len(output)}B): {output[:400]!r}"
         )
-        return _compare_outputs(output, buggy_output, correct_output)
+        return _compare_outputs(output, buggy_output, correct_output, reproducer)
 
     except subprocess.TimeoutExpired:
         return ValidationResult(
@@ -131,14 +134,153 @@ def _mongodb_wait_ready(container: str) -> bool:
     return False
 
 
+# ── CockroachDB validator ─────────────────────────────────────────────────────
+
+# Cockroach init (disk write, range bootstrapping, SQL listener) routinely
+# takes 30–60s on a cold machine even after the image is present — keep this
+# separate from the mongodb timeout so we don't give mongod a generous budget
+# it doesn't need.
+_CRDB_READY_TIMEOUT_S = 90
+# Image pull can take longer than the ready wait on a fresh host; time it
+# separately so we don't tar it with cockroach's own startup budget.
+_CRDB_PULL_TIMEOUT_S = 300
+
+
+def _validate_cockroachdb(
+    spec: DBBuildSpec,
+    version: str,
+    reproducer: str,
+    buggy_output: str | None,
+    correct_output: str | None,
+) -> ValidationResult:
+    image = spec.resolved_base_image(version)
+
+    manifest = subprocess.run(
+        ["docker", "manifest", "inspect", image],
+        capture_output=True, text=True,
+    )
+    if manifest.returncode != 0:
+        return ValidationResult(
+            False, skipped=True,
+            reason=f"stock image {image!r} not on registry — cannot validate",
+        )
+
+    # Pull explicitly so the readiness wait only covers cockroach startup,
+    # not a 250MB cold image fetch.
+    logger.info(f"[ReproducerValidator] pulling {image} (up to {_CRDB_PULL_TIMEOUT_S}s)")
+    pull = subprocess.run(
+        ["docker", "pull", image],
+        capture_output=True, text=True, timeout=_CRDB_PULL_TIMEOUT_S,
+    )
+    if pull.returncode != 0:
+        return ValidationResult(
+            False, skipped=True,
+            reason=f"docker pull {image!r} failed: {pull.stderr.strip()[:200]}",
+        )
+
+    container = f"sregym-validate-cockroachdb-{int(time.time() * 1000)}"
+    logger.info(f"[ReproducerValidator] starting {image} as {container}")
+    # In-memory store keeps validation fast and avoids leaving a disk image
+    # behind if the container is killed mid-startup.
+    run = subprocess.run(
+        ["docker", "run", "--rm", "-d", "--name", container, image,
+         "start-single-node", "--insecure", "--store=type=mem,size=1GB",
+         "--listen-addr=0.0.0.0:26257"],
+        capture_output=True, text=True,
+    )
+    if run.returncode != 0:
+        return ValidationResult(
+            False, skipped=True,
+            reason=f"docker run failed: {run.stderr.strip()[:200]}",
+        )
+
+    try:
+        if not _cockroachdb_wait_ready(container):
+            return ValidationResult(
+                False, skipped=True,
+                reason=f"cockroach in {container!r} never became ready in {_CRDB_READY_TIMEOUT_S}s",
+            )
+
+        # Pipe the reproducer via stdin so multi-statement scripts — including
+        # ones with embedded semicolons inside string literals — parse the same
+        # way the in-cluster client pod would.
+        exec_r = subprocess.run(
+            ["docker", "exec", "-i", container, "cockroach", "sql", "--insecure"],
+            input=reproducer,
+            capture_output=True, text=True, timeout=_REPRO_TIMEOUT_S,
+        )
+        output = exec_r.stdout + ("\n" + exec_r.stderr if exec_r.stderr else "")
+        logger.info(
+            f"[ReproducerValidator] reproducer output (rc={exec_r.returncode}, "
+            f"{len(output)}B): {output[:400]!r}"
+        )
+        return _compare_outputs(output, buggy_output, correct_output, reproducer)
+
+    except subprocess.TimeoutExpired:
+        return ValidationResult(
+            False, skipped=True,
+            reason=f"reproducer exceeded {_REPRO_TIMEOUT_S}s timeout",
+        )
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+
+
+def _cockroachdb_wait_ready(container: str) -> bool:
+    deadline = time.time() + _CRDB_READY_TIMEOUT_S
+    while time.time() < deadline:
+        r = subprocess.run(
+            ["docker", "exec", container, "cockroach", "sql", "--insecure",
+             "--execute", "SELECT 1"],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            return True
+        time.sleep(1)
+    return False
+
+
 # ── Output comparison ─────────────────────────────────────────────────────────
 
 def _compare_outputs(
     actual: str,
     buggy_output: str | None,
     correct_output: str | None,
+    reproducer: str | None = None,
 ) -> ValidationResult:
-    actual_norm = _normalize(actual)
+    # Circular invariant: if the reproducer itself already contains buggy_output
+    # verbatim, we cannot distinguish a real reproduction from the client simply
+    # echoing the input (cockroach sql and mongosh both include the failing
+    # statement in their error reports). This happens when a crash traceback is
+    # mistakenly extracted as the reproducer — the fix is earlier in the
+    # pipeline, so here we just refuse to validate.
+    if reproducer and buggy_output:
+        buggy_norm_check = _normalize(buggy_output)
+        repro_norm_check = _normalize(reproducer)
+        if buggy_norm_check and len(buggy_norm_check) > 20 and buggy_norm_check in repro_norm_check:
+            return ValidationResult(
+                False, skipped=True,
+                reason=(
+                    "reproducer text already contains buggy_output verbatim — "
+                    "substring match on actual output would be circular; extraction "
+                    "likely captured a crash traceback instead of an executable script"
+                ),
+                actual_output=actual,
+            )
+
+    # Strip the reproducer echo from actual before fuzzy-matching. SQL clients
+    # include the failing input in their error hints, which would otherwise
+    # allow any substring of the reproducer to match against buggy_output.
+    comparable = actual
+    if reproducer:
+        stripped = reproducer.strip()
+        if stripped:
+            comparable = comparable.replace(stripped, "")
+        for line in stripped.splitlines():
+            line = line.strip()
+            if len(line) >= 8:
+                comparable = comparable.replace(line, "")
+
+    actual_norm = _normalize(comparable)
     buggy_norm = _normalize(buggy_output) if buggy_output else None
     correct_norm = _normalize(correct_output) if correct_output else None
 

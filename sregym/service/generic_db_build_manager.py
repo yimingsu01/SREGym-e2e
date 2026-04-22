@@ -199,7 +199,7 @@ class GenericDBBuildManager:
             platform = self._cluster_platform()
             logger.info(f"[GenericBuildMgr] docker buildx build {image_tag} for {platform} (prebuilt)")
             result = subprocess.run(
-                f"docker buildx build --platform {platform} --load -t {image_tag} .",
+                f"docker buildx build --platform {platform} --provenance=false --sbom=false --load -t {image_tag} .",
                 cwd=build_ctx,
                 shell=True,
                 capture_output=True,
@@ -250,7 +250,7 @@ class GenericDBBuildManager:
             platform = self._cluster_platform()
             logger.info(f"[GenericBuildMgr] docker buildx build {image_tag} for {platform}")
             result = subprocess.run(
-                f"docker buildx build --platform {platform} --load -t {image_tag} .",
+                f"docker buildx build --platform {platform} --provenance=false --sbom=false --load -t {image_tag} .",
                 cwd=build_ctx,
                 shell=True,
                 capture_output=True,
@@ -306,12 +306,19 @@ class GenericDBBuildManager:
     #   3. Privileged DaemonSet via kubectl cp + docker load
 
     def _load_into_cluster(self, image_tag: str):
-        if subprocess.run(
+        kind_r = subprocess.run(
             f"kind load docker-image {image_tag}",
             shell=True, capture_output=True, text=True,
-        ).returncode == 0:
+        )
+        if kind_r.returncode == 0:
             logger.info(f"[GenericBuildMgr] Loaded {image_tag} into kind cluster")
             return
+        # Log the reason — silent kind failures used to send us down SSH/DaemonSet
+        # fallbacks that are both broken on modern kind (no sshd, containerd not docker).
+        logger.warning(
+            f"[GenericBuildMgr] kind load failed for {image_tag}: "
+            f"{(kind_r.stderr or kind_r.stdout).strip()[:500]}"
+        )
 
         node_ips = self._get_cluster_node_ips()
         if node_ips:

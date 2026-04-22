@@ -68,7 +68,26 @@ class ProblemGenerator:
         up to ``_MAX_REPAIR_ATTEMPTS`` times. A successful repair mutates
         ``parsed.reproducer`` so the rendered problem file contains the fixed version.
         """
-        if parsed.crash_on_startup or not parsed.reproducer:
+        if parsed.crash_on_startup:
+            return
+
+        # Extraction returned nothing — either the issue is Sentry-auto-filed, the
+        # body only contains a stack trace, or the sanity check in
+        # reproducer_extractor rejected the candidate as non-executable. Generating
+        # a bare problem file would silently ship a no-op benchmark, so fail loudly
+        # unless the caller has explicitly opted out of validation.
+        if not parsed.reproducer:
+            msg = (
+                f"No reproducer could be extracted from {issue_url}. The issue may "
+                f"be Sentry-auto-filed, contain only a stack trace / panic dump, or "
+                f"use redacted SQL placeholders — none of which yield a replayable "
+                f"bug trigger. Edit the issue body to include an executable "
+                f"reproducer, or set SREGYM_SKIP_REPRODUCER_VALIDATION=1 to emit a "
+                f"bare problem file for manual completion."
+            )
+            if validation_required():
+                raise ValueError(msg)
+            logger.warning(f"[ProblemGenerator] {msg}")
             return
 
         result = validate_reproducer(
@@ -148,6 +167,10 @@ class ProblemGenerator:
     @staticmethod
     def _render(issue_url: str, parsed: ParsedIssue, class_name: str) -> str:
         description = ProblemGenerator._safe_description(parsed)
+        # Sentry-auto-filed issues (e.g. cockroach) can stuff multi-line stack
+        # traces into the title field.  If those newlines reach the docstring
+        # template they introduce zero-indent lines that defeat textwrap.dedent.
+        title = re.sub(r"\s+", " ", parsed.title).strip()
 
         # 16 spaces = 12 (template common prefix) + 4 (class body indent)
         # so textwrap.dedent strips 12 and leaves 4 in the output file.
@@ -174,7 +197,7 @@ class ProblemGenerator:
         return textwrap.dedent(f'''\
             """Auto-generated from {issue_url}
 
-            Title: {parsed.title}
+            Title: {title}
             """
             from sregym.conductor.problems.generic_custom_build import GenericCustomBuildProblem
 

@@ -60,14 +60,31 @@ class GenericDBApplication:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def deploy(self):
-        """Install operator + deploy cluster, wait for it to be ready."""
+        """Install operator + deploy cluster, wait for it to be ready.
+
+        When spec.helm_deploy_chart is True, the Helm release IS the cluster
+        (no separate CR) — _deploy_cluster is a no-op and the image choice is
+        passed to _install_operator via --set values.
+        """
         logger.info(f"Deploying {self.spec.name} {self.version} via {self.spec.operator_chart}")
         if self.spec.prereqs_fn:
             self.spec.prereqs_fn()
-        self._install_operator()
-        self._deploy_cluster(custom_image=self.initial_image)
+        self._install_operator(custom_image=self.initial_image)
+        if not self.spec.helm_deploy_chart:
+            self._deploy_cluster(custom_image=self.initial_image)
         self._wait_for_cluster_ready()
         logger.info(f"{self.spec.name} cluster deployed")
+
+    def _helm_release_name(self) -> str:
+        """Helm release name.
+
+        For helm_deploy_chart DBs the release name doubles as the StatefulSet/Service
+        prefix, so pin it to cluster_name — that's what reproducer helpers build
+        service DNS from (e.g. ``{cluster_name}-public``).
+        """
+        if self.spec.helm_deploy_chart:
+            return self.cluster_name
+        return f"{self.spec.name}-operator"
 
     def inject_buggy_image(self, image_tag: str):
         """Patch the running cluster to use a custom-built (buggy) image.
@@ -75,14 +92,20 @@ class GenericDBApplication:
         First gives the operator a chance to propagate the CR change itself.
         If the operator stalls (e.g. sets partition=1 or ignores spec.*.image),
         falls back to scaling it down and patching StatefulSets directly.
+
+        For helm_deploy_chart DBs there is no CR — go straight to the direct
+        StatefulSet patch path.
         """
-        patch = self.spec.image_patch_fn(self.cluster_name, self.namespace, image_tag)
-        patch_json = json.dumps(patch)
         logger.info(f"Swapping {self.spec.name} cluster to image: {image_tag}")
-        _run(
-            f"kubectl patch {self.spec.cr_kind} {self.cluster_name} "
-            f"-n {self.namespace} --type=merge -p '{patch_json}'"
-        )
+        if self.spec.helm_deploy_chart:
+            self._operator_override(image_tag)
+        else:
+            patch = self.spec.image_patch_fn(self.cluster_name, self.namespace, image_tag)
+            patch_json = json.dumps(patch)
+            _run(
+                f"kubectl patch {self.spec.cr_kind} {self.cluster_name} "
+                f"-n {self.namespace} --type=merge -p '{patch_json}'"
+            )
         logger.info("Image patched — waiting for rolling restart")
         self._wait_for_image_rollout(image_tag)
         logger.info(f"Cluster ready with image: {image_tag}")
@@ -99,11 +122,14 @@ class GenericDBApplication:
         self._scale_operator_up()
         time.sleep(5)
 
-        patch = self.spec.image_patch_fn(self.cluster_name, self.namespace, stock_image)
-        _run(
-            f"kubectl patch {self.spec.cr_kind} {self.cluster_name} "
-            f"-n {self.namespace} --type=merge -p '{json.dumps(patch)}'"
-        )
+        if self.spec.helm_deploy_chart:
+            self._operator_override(stock_image, from_image=custom_image)
+        else:
+            patch = self.spec.image_patch_fn(self.cluster_name, self.namespace, stock_image)
+            _run(
+                f"kubectl patch {self.spec.cr_kind} {self.cluster_name} "
+                f"-n {self.namespace} --type=merge -p '{json.dumps(patch)}'"
+            )
         self._wait_for_image_rollout(stock_image, from_image=custom_image)
         # Re-scale operator up in case the fallback override scaled it down during rollout
         self._scale_operator_up()
@@ -116,24 +142,29 @@ class GenericDBApplication:
         Applies the same operator-override fallback as inject_buggy_image() so
         the image actually reaches the pods even if the operator stalls.
         """
-        patch = self.spec.image_patch_fn(self.cluster_name, self.namespace, image_tag)
-        patch_json = json.dumps(patch)
         logger.info(f"Swapping {self.spec.name} cluster to image: {image_tag} (expecting startup crash)")
-        _run(
-            f"kubectl patch {self.spec.cr_kind} {self.cluster_name} "
-            f"-n {self.namespace} --type=merge -p '{patch_json}'"
-        )
+        if self.spec.helm_deploy_chart:
+            self._operator_override(image_tag)
+        else:
+            patch = self.spec.image_patch_fn(self.cluster_name, self.namespace, image_tag)
+            patch_json = json.dumps(patch)
+            _run(
+                f"kubectl patch {self.spec.cr_kind} {self.cluster_name} "
+                f"-n {self.namespace} --type=merge -p '{patch_json}'"
+            )
         self._wait_for_crash_loop(image_tag, timeout)
 
     def cleanup(self):
         """Delete cluster CR, namespaces, leftover PVs, and the operator."""
         logger.info(f"Cleaning up {self.spec.name} deployment")
 
-        _run(
-            f"kubectl delete {self.spec.cr_kind} {self.cluster_name} "
-            f"-n {self.namespace} --ignore-not-found",
-            check=False,
-        )
+        # No CR exists for helm_deploy_chart DBs — skip the kubectl delete.
+        if not self.spec.helm_deploy_chart:
+            _run(
+                f"kubectl delete {self.spec.cr_kind} {self.cluster_name} "
+                f"-n {self.namespace} --ignore-not-found",
+                check=False,
+            )
 
         self._delete_namespace(self.namespace)
 
@@ -154,8 +185,9 @@ class GenericDBApplication:
                     shell=True, check=False,
                 )
 
+        release = self._helm_release_name()
         subprocess.run(
-            f"helm uninstall {self.spec.name}-operator -n {self.spec.operator_namespace} 2>/dev/null || true",
+            f"helm uninstall {release} -n {self.spec.operator_namespace} 2>/dev/null || true",
             shell=True, check=False,
         )
         self._delete_namespace(self.spec.operator_namespace)
@@ -189,7 +221,7 @@ class GenericDBApplication:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _install_operator(self):
+    def _install_operator(self, custom_image: str | None = None):
         logger.info(f"Installing {self.spec.operator_chart} in '{self.spec.operator_namespace}'")
         try:
             Helm.add_repo(self.spec.operator_helm_repo, self.spec.operator_helm_repo_url)
@@ -197,8 +229,9 @@ class GenericDBApplication:
         except RuntimeError as e:
             logger.warning(f"Helm repo setup issue (continuing with cached charts): {e}")
 
+        release = self._helm_release_name()
         existing = subprocess.run(
-            f"helm status {self.spec.name}-operator -n {self.spec.operator_namespace}",
+            f"helm status {release} -n {self.spec.operator_namespace}",
             shell=True, capture_output=True, text=True,
         )
         if existing.returncode == 0:
@@ -207,18 +240,47 @@ class GenericDBApplication:
                 return
             if "failed" in existing.stdout:
                 subprocess.run(
-                    f"helm uninstall {self.spec.name}-operator -n {self.spec.operator_namespace}",
+                    f"helm uninstall {release} -n {self.spec.operator_namespace}",
                     shell=True, check=False,
                 )
 
-        helm_cmd = (
-            f"helm upgrade --install {self.spec.name}-operator {self.spec.operator_chart} "
-            f"--namespace {self.spec.operator_namespace} "
-            f"--create-namespace "
-            f"--set global.clusterScoped=true "
-            f"{self.spec.operator_extra_helm_args} "
-            f"--wait --timeout 5m"
-        )
+        # Chart-only DBs (helm_deploy_chart) drop the operator-flavoured flags
+        # (global.clusterScoped) and instead inject the DB image via --set.
+        # fullnameOverride pins the StatefulSet/Service names to cluster_name
+        # so reproducer helpers resolve `{cluster_name}-public` deterministically.
+        if self.spec.helm_deploy_chart:
+            image_tag = self.spec.git_ref(self.version)  # e.g. "v24.1.4"
+            image_repo = "cockroachdb/cockroach"  # chart default; overridden for custom images
+            if custom_image:
+                repo, _, tag = custom_image.rpartition(":")
+                if repo and tag:
+                    image_repo, image_tag = repo, tag
+            image_flags = (
+                f"--set image.repository={image_repo} --set image.tag={image_tag} "
+            )
+            # No --wait for helm_deploy_chart: the cockroachdb chart ships a
+            # separate ``cockroach init`` Job that bootstraps the cluster, and
+            # the StatefulSet can't pass its readiness probe until that Job
+            # runs.  helm --wait only blocks on the StatefulSet, so it times
+            # out opaquely while init is still pending.  _wait_for_cluster_ready
+            # polls with visible logging and tolerates the longer bring-up.
+            helm_cmd = (
+                f"helm upgrade --install {release} {self.spec.operator_chart} "
+                f"--namespace {self.spec.operator_namespace} "
+                f"--create-namespace "
+                f"--set fullnameOverride={self.cluster_name} "
+                f"{image_flags}"
+                f"{self.spec.operator_extra_helm_args}"
+            )
+        else:
+            helm_cmd = (
+                f"helm upgrade --install {release} {self.spec.operator_chart} "
+                f"--namespace {self.spec.operator_namespace} "
+                f"--create-namespace "
+                f"--set global.clusterScoped=true "
+                f"{self.spec.operator_extra_helm_args} "
+                f"--wait --timeout 5m"
+            )
         for attempt in range(1, 4):
             try:
                 _run(helm_cmd)
@@ -253,6 +315,10 @@ class GenericDBApplication:
         operator is still creating pods (e.g. PD ready before TiKV/TiDB exist).
         """
         label = f"app.kubernetes.io/instance={self.cluster_name}"
+        # Exclude one-shot Job pods that share the instance label but terminate
+        # Completed/Failed — e.g. cockroachdb's cluster-init Job.  They can
+        # never pass condition=Ready, which would otherwise stall this loop.
+        field_sel = "status.phase!=Succeeded,status.phase!=Failed"
         logger.info(
             f"Waiting for cluster '{self.cluster_name}' pods "
             f"(label: {label}) to be Ready (up to {timeout}s)…"
@@ -263,7 +329,8 @@ class GenericDBApplication:
 
         while time.time() < deadline:
             out = subprocess.run(
-                f"kubectl get pods -n {self.namespace} -l '{label}' --no-headers 2>/dev/null",
+                f"kubectl get pods -n {self.namespace} -l '{label}' "
+                f"--field-selector='{field_sel}' --no-headers 2>/dev/null",
                 shell=True, capture_output=True, text=True,
             )
             pods = [l for l in out.stdout.strip().splitlines() if l]
@@ -272,6 +339,7 @@ class GenericDBApplication:
             if count > 0 and count == last_count:
                 r = subprocess.run(
                     f"kubectl wait pods -n {self.namespace} -l '{label}' "
+                    f"--field-selector='{field_sel}' "
                     f"--for=condition=Ready --timeout=5s",
                     shell=True, capture_output=True, text=True,
                 )

@@ -430,7 +430,7 @@ def main(args):
     conductor_config = ConductorConfig(
         deploy_loki=not args.use_external_harness,
         deploy_openebs=not args.skip_openebs,
-        deploy_observability=not args.skip_observability,
+        deploy_observability=args.deploy_observability,
         enable_noise=args.noise,
     )
     conductor = Conductor(config=conductor_config)
@@ -579,9 +579,9 @@ if __name__ == "__main__":
         help="Skip deploying OpenEBS storage (use existing storage setup)",
     )
     parser.add_argument(
-        "--skip-observability",
+        "--deploy-observability",
         action="store_true",
-        help="Skip deploying observability stack (Prometheus, Jaeger, OTel Collector, Loki)",
+        help="Deploy observability stack (Prometheus, Jaeger, OTel Collector, Loki). Default: skipped.",
     )
     args = parser.parse_args()
 

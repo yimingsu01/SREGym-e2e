@@ -60,10 +60,12 @@ class DBBuildSpec:
     # Generates the Kubernetes CR manifest YAML for this database.
     # Called as: cluster_manifest_fn(cluster_name, namespace, version, custom_image)
     # custom_image is None for a stock deploy; set to an image tag for a buggy deploy.
-    cluster_manifest_fn: Callable[[str, str, str, str | None], str]
+    # Unused (and may be None) when helm_deploy_chart=True — the Helm install IS the deploy.
+    cluster_manifest_fn: Callable[[str, str, str, str | None], str] | None
 
     # Returns the JSON merge-patch dict that swaps the running cluster's image.
     # Called as: image_patch_fn(cluster_name, namespace, new_image) → dict
+    # Unused when helm_deploy_chart=True — the StatefulSet is patched directly instead.
     image_patch_fn: Callable[[str, str, str], dict]
 
     # Optional operator prerequisites (e.g. cert-manager for K8ssandra).
@@ -93,6 +95,15 @@ class DBBuildSpec:
     # enterprise modules repo) but the bug is already present in the stock
     # binary.  build_cmd / artifact_glob / artifact_dest are ignored in this mode.
     prebuilt_from_stock: bool = field(default=False)
+
+    # The Helm release IS the cluster (no separate operator + CR).  Used for
+    # CockroachDB, where cockroach-operator was sunset and the supported path
+    # is the direct cockroachdb/cockroachdb chart which renders a StatefulSet
+    # with no CRD.  When True:
+    #   • cluster_manifest_fn / image_patch_fn / cr_kind are unused (may be None/"")
+    #   • operator_namespace doubles as the cluster namespace
+    #   • image swaps go to the StatefulSet directly (via _operator_override path)
+    helm_deploy_chart: bool = field(default=False)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -623,6 +634,105 @@ def _mongodb_reproducer_workload(
     return _workload_manifest(cluster_name, namespace, "mongo:6", loop_cmd, reproducer, "run.js", probe_script)
 
 
+# Unused under helm_deploy_chart (no CR to patch) but kept to satisfy the
+# required-field schema and in case a future deploy mode routes through it.
+def _cockroachdb_image_patch(_cluster: str, _ns: str, image: str) -> dict:  # type: ignore[override]
+    return {"spec": {"template": {"spec": {"containers": [{"name": "db", "image": image}]}}}}
+
+
+def _cockroachdb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> None:
+    import subprocess
+    import logging
+    log = logging.getLogger(__name__)
+    svc = f"{cluster_name}-public.{namespace}.svc.cluster.local"
+    pod = "cockroach-sql-client"
+
+    # Wrap in a fresh temp DB so repeated runs can't collide on CREATE TABLE.
+    db_name = "sregym_oneshot"
+    reproducer = (
+        f"CREATE DATABASE IF NOT EXISTS {db_name};\n"
+        f"USE {db_name};\n"
+        + reproducer
+    )
+
+    log.info("[Reproducer] Running CockroachDB SQL reproducer")
+    try:
+        subprocess.run(
+            f"kubectl delete pod {pod} -n {namespace} --ignore-not-found",
+            shell=True, capture_output=True,
+        )
+        # `-- sleep 3600` overrides the cockroach binary entrypoint so the pod
+        # stays alive for exec.  The image ships /bin/sh and the cockroach CLI.
+        subprocess.run(
+            f"kubectl run {pod} --image=cockroachdb/cockroach:v24.1.4 "
+            f"--restart=Never -n {namespace} -- sleep 3600",
+            shell=True, check=True, capture_output=True,
+        )
+        subprocess.run(
+            f"kubectl wait pod/{pod} -n {namespace} --for=condition=Ready --timeout=120s",
+            shell=True, check=True, capture_output=True,
+        )
+        result = subprocess.run(
+            f"kubectl exec -i {pod} -n {namespace} -- "
+            f"cockroach sql --insecure --host={svc} --port=26257",
+            shell=True, input=reproducer,
+            capture_output=True, text=True, timeout=120,
+        )
+        stderr = result.stderr.strip()
+        if result.returncode == 0:
+            log.info(f"[Reproducer] Query completed: {result.stdout.strip()[:200]}")
+        else:
+            log.info(f"[Reproducer] cockroach sql exited {result.returncode} (may be expected): {stderr[:300]}")
+    except Exception as e:
+        log.warning(f"[Reproducer] Error: {e}")
+    finally:
+        subprocess.run(
+            f"kubectl delete pod {pod} -n {namespace} --ignore-not-found --wait=false",
+            shell=True, capture_output=True,
+        )
+
+
+def _cockroachdb_reproducer_workload(
+    cluster_name: str, namespace: str, reproducer: str, expected_output: str | None = None
+) -> str:
+    # Same shape as the TiDB workload: per-iteration temp DB avoids table-exists
+    # errors and CockroachDB's MVCC-aware DROP DATABASE is cheap enough to use
+    # between iterations.
+    svc = f"{cluster_name}-public.{namespace}.svc.cluster.local"
+    cockroach = f"cockroach sql --insecure --host={svc} --port=26257"
+    loop_cmd = (
+        "while true; do "
+        'DB=sregym_$(date +%s); '
+        f'out=$(printf "CREATE DATABASE $DB;\\nUSE $DB;\\n" | cat - /scripts/run.sql | timeout 30 {cockroach} 2>&1); '
+        'rc=$?; if [ -n "$out" ]; then echo "$out"; else echo "(empty result set)"; fi; '
+        f'{cockroach} -e "DROP DATABASE $DB CASCADE" > /dev/null 2>&1 || true; '
+        "sleep 10; done"
+    )
+    if expected_output:
+        safe = expected_output.replace("'", "'\\''")
+        probe_script = (
+            "#!/bin/sh\n"
+            "DB=sregym_probe\n"
+            f'{cockroach} -e "CREATE DATABASE IF NOT EXISTS $DB" > /dev/null 2>&1\n'
+            f'out=$(printf "USE $DB;\\n" | cat - /scripts/run.sql | {cockroach} --format=tsv 2>/dev/null)\n'
+            f"printf '%s' \"$out\" | grep -qF '{safe}' && exit 0\n"
+            "exit 1\n"
+        )
+    else:
+        probe_script = (
+            "#!/bin/sh\n"
+            "DB=sregym_probe_$(date +%s)\n"
+            f'printf "CREATE DATABASE $DB;\\nUSE $DB;\\n" | cat - /scripts/run.sql | {cockroach} > /dev/null 2>&1\n'
+            "rc=$?\n"
+            f'{cockroach} -e "DROP DATABASE $DB CASCADE" > /dev/null 2>&1 || true\n'
+            "exit $rc\n"
+        )
+    return _workload_manifest(
+        cluster_name, namespace, "cockroachdb/cockroach:v24.1.4",
+        loop_cmd, reproducer, "run.sql", probe_script,
+    )
+
+
 def _cassandra_reproducer_workload(
     cluster_name: str, namespace: str, reproducer: str, expected_output: str | None = None
 ) -> str:
@@ -747,5 +857,65 @@ DB_REGISTRY: dict[str, DBBuildSpec] = {
         jira_project="SERVER",
         run_reproducer_fn=_mongodb_run_reproducer,
         reproducer_workload_fn=_mongodb_reproducer_workload,
+    ),
+    "cockroachdb": DBBuildSpec(
+        name="cockroachdb",
+        repo_url="https://github.com/cockroachdb/cockroach",
+        github_repo="cockroachdb/cockroach",
+        # Release tags: v23.2.4, v24.1.0, v24.3.1, …
+        version_tag_pattern="v{version}",
+        # build_image / build_cmd / artifact_glob / artifact_dest are unused
+        # when prebuilt_from_stock=True — kept as placeholders for the schema.
+        build_image="golang:1.22",
+        build_cmd="true",
+        artifact_glob="UNUSED",
+        base_image="cockroachdb/cockroach:v{version}",
+        artifact_dest="/cockroach/cockroach",
+        # The CockroachDB source is a large Go monorepo that requires bazelisk,
+        # node, protobuf, and ~30 minutes per clean build.  Publicly-reported
+        # bugs that surface via SQL exist in the stock published images
+        # (cockroachdb/cockroach:v{version}), so the "custom" image simply
+        # re-tags the stock one.  The source tree is still cloned for static
+        # analysis by diagnosis oracles.
+        prebuilt_from_stock=True,
+        # cockroach-operator was sunset; the supported Kubernetes path is now
+        # the direct cockroachdb/cockroachdb chart, which renders a StatefulSet
+        # with no CRD.  helm_deploy_chart=True tells GenericDBApplication to
+        # treat the Helm release itself as the cluster (no CR to apply/patch).
+        operator_helm_repo="cockroachdb",
+        operator_helm_repo_url="https://charts.cockroachdb.com/",
+        operator_chart="cockroachdb/cockroachdb",
+        # Under helm_deploy_chart, operator_namespace doubles as the cluster
+        # namespace — the release goes here and the StatefulSet pods live here.
+        operator_namespace="cockroachdb",
+        default_cluster_name="sregym-cockroachdb",
+        # cr_kind / cluster_manifest_fn are unused when helm_deploy_chart=True.
+        cr_kind="",
+        cluster_manifest_fn=None,
+        image_patch_fn=_cockroachdb_image_patch,
+        helm_deploy_chart=True,
+        # Single-node, insecure, openebs-hostpath — matches what kind exposes
+        # and keeps the cluster footprint small.  image.tag is injected by
+        # _install_operator based on self.version (can't be static here).
+        # fullnameOverride ties Service names to cluster_name so the reproducer
+        # can resolve {cluster_name}-public deterministically regardless of
+        # release-name quirks.
+        # tls.certs.selfSigner.enabled=false drops a cert-rotation CronJob that
+        # the chart still emits with apiVersion batch/v1beta1 (removed in
+        # Kubernetes 1.25) even when tls.enabled=false.
+        operator_extra_helm_args=(
+            "--set statefulset.replicas=1 "
+            "--set tls.enabled=false "
+            "--set tls.certs.selfSigner.enabled=false "
+            "--set tls.certs.selfSigner.rotateCerts=false "
+            "--set storage.persistentVolume.size=1Gi "
+            "--set storage.persistentVolume.storageClass=openebs-hostpath "
+            "--set statefulset.resources.requests.cpu=250m "
+            "--set statefulset.resources.requests.memory=512Mi "
+            "--set statefulset.resources.limits.cpu=1 "
+            "--set statefulset.resources.limits.memory=1Gi"
+        ),
+        run_reproducer_fn=_cockroachdb_run_reproducer,
+        reproducer_workload_fn=_cockroachdb_reproducer_workload,
     ),
 }

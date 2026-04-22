@@ -103,11 +103,22 @@ class SourceManager:
                 f"Last error: {r.stderr.strip()}"
             )
 
+        # Clear any leftover files from a prior partial run so checkout
+        # doesn't abort with "untracked working tree files would be overwritten".
         subprocess.run(
+            ["git", "clean", "-fdx"],
+            cwd=str(source_dir),
+            capture_output=True, text=True,
+        )
+        r = subprocess.run(
             ["git", "checkout", "FETCH_HEAD"],
             cwd=str(source_dir),
-            check=True, capture_output=True, text=True,
+            capture_output=True, text=True,
         )
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"git checkout FETCH_HEAD failed in {source_dir}: {r.stderr.strip()}"
+            )
         logger.info(f"Fetch + checkout successful at {source_dir}")
         return source_dir
 

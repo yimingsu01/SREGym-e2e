@@ -170,6 +170,15 @@ class GitHubIssueParser:
             if self._tag_exists_in_repo(ref):
                 return ref, False
 
+        # c'. branch-release-X.Y label → latest published vX.Y.Z tag
+        resolved = self._find_tag_from_branch_release_labels(issue, spec)
+        if resolved:
+            version, ref = resolved
+            logger.info(
+                f"[IssueParser] branch-release label → latest tag {version} ({ref})"
+            )
+            return ref, False
+
         # d. Milestone version
         version = self._find_version_in_milestone(issue)
         if version:
@@ -273,6 +282,9 @@ class GitHubIssueParser:
         if v:
             return v
         if spec:
+            resolved = self._find_tag_from_branch_release_labels(issue, spec)
+            if resolved:
+                return resolved[0]
             v = self._llm_extract_version(text, spec)
             if v:
                 return v
@@ -286,6 +298,57 @@ class GitHubIssueParser:
             if m:
                 return m.group(1)
         return None
+
+    def _find_tag_from_branch_release_labels(
+        self, issue: dict, spec: DBBuildSpec
+    ) -> tuple[str, str] | None:
+        """Map ``branch-release-X.Y`` labels to the newest published vX.Y.Z tag.
+
+        CockroachDB (and some other projects) label bugs with the release branches
+        they affect (e.g. ``branch-release-25.2``) rather than a concrete version.
+        Those labels don't match ``_VERSION_LABEL_RE`` and the issue body often
+        doesn't name a released version either. Using the latest patch tag on the
+        newest affected branch gives us a real ref to clone against.
+        """
+        minors: list[tuple[int, int]] = []
+        for label in issue.get("labels", []):
+            name = label.get("name", "").strip().lower()
+            m = re.fullmatch(r"branch-release-(\d+)\.(\d+)", name)
+            if m:
+                minors.append((int(m.group(1)), int(m.group(2))))
+        if not minors:
+            return None
+        # Try newest major.minor first and fall back on API/tag misses.
+        for major, minor in sorted(set(minors), reverse=True):
+            latest = self._latest_patch_tag(spec, major, minor)
+            if latest:
+                return latest
+        return None
+
+    def _latest_patch_tag(
+        self, spec: DBBuildSpec, major: int, minor: int
+    ) -> tuple[str, str] | None:
+        """Return (version, ref) for the highest vX.Y.Z tag in this repo, or None."""
+        prefix = spec.git_ref(f"{major}.{minor}.")  # e.g. "v25.2."
+        try:
+            refs = self._fetch(
+                f"/repos/{self.owner}/{self.repo}/git/matching-refs/tags/{prefix}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[IssueParser] matching-refs lookup for {prefix!r} failed: {e}"
+            )
+            return None
+        if not isinstance(refs, list):
+            return None
+        # Only accept pure numeric patches — skip pre-release tags like
+        # v25.2.0-alpha.1 that won't have a published Docker image.
+        pat = re.compile(r"^refs/tags/" + re.escape(prefix) + r"(\d+)$")
+        patches = [int(m.group(1)) for r in refs if (m := pat.match(r.get("ref", "")))]
+        if not patches:
+            return None
+        version = f"{major}.{minor}.{max(patches)}"
+        return version, spec.git_ref(version)
 
     def _find_version_in_milestone(self, issue: dict) -> str | None:
         milestone = issue.get("milestone")
