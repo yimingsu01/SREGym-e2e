@@ -370,6 +370,29 @@ def _tidb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> 
 
 # ── Continuous reproducer workloads ──────────────────────────────────────────
 
+def _strip_sql_db_setup(sql: str) -> str:
+    """Remove CREATE DATABASE / USE statements from a SQL reproducer.
+
+    The continuous workload loop already prepends its own per-iteration DB
+    creation and USE, so any such lines in the raw reproducer would either
+    collide (database exists on iteration 2+) or silently switch to the wrong
+    database.
+    """
+    import re
+    lines = []
+    for line in sql.splitlines():
+        stripped = line.strip()
+        if re.match(r"(?i)create\s+database\b", stripped):
+            continue
+        if re.match(r"(?i)use\s+\S", stripped):
+            continue
+        lines.append(line)
+    # Drop leading blank lines left by the removed statements.
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines)
+
+
 def _workload_manifest(
     cluster_name: str,
     namespace: str,
@@ -454,6 +477,7 @@ spec:
 def _tidb_reproducer_workload(
     cluster_name: str, namespace: str, reproducer: str, expected_output: str | None = None
 ) -> str:
+    reproducer = _strip_sql_db_setup(reproducer)
     # run.sql holds the raw reproducer; the shell loop prepends DB setup so we
     # never run DROP DATABASE (which raises ERROR 1008 on TiDB even with IF EXISTS).
     # A timestamped DB name avoids table-already-exists errors between iterations.
@@ -661,11 +685,10 @@ def _cockroachdb_run_reproducer(cluster_name: str, namespace: str, reproducer: s
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found",
             shell=True, capture_output=True,
         )
-        # `-- sleep 3600` overrides the cockroach binary entrypoint so the pod
-        # stays alive for exec.  The image ships /bin/sh and the cockroach CLI.
+        # --command overrides the entrypoint so sleep runs via /bin/sh, not cockroach.
         subprocess.run(
             f"kubectl run {pod} --image=cockroachdb/cockroach:v24.1.4 "
-            f"--restart=Never -n {namespace} -- sleep 3600",
+            f"--restart=Never -n {namespace} --command -- /bin/sh -c 'sleep 3600'",
             shell=True, check=True, capture_output=True,
         )
         subprocess.run(
@@ -695,6 +718,7 @@ def _cockroachdb_run_reproducer(cluster_name: str, namespace: str, reproducer: s
 def _cockroachdb_reproducer_workload(
     cluster_name: str, namespace: str, reproducer: str, expected_output: str | None = None
 ) -> str:
+    reproducer = _strip_sql_db_setup(reproducer)
     # Same shape as the TiDB workload: per-iteration temp DB avoids table-exists
     # errors and CockroachDB's MVCC-aware DROP DATABASE is cheap enough to use
     # between iterations.
@@ -903,6 +927,47 @@ DB_REGISTRY: dict[str, DBBuildSpec] = {
         # tls.certs.selfSigner.enabled=false drops a cert-rotation CronJob that
         # the chart still emits with apiVersion batch/v1beta1 (removed in
         # Kubernetes 1.25) even when tls.enabled=false.
+        operator_extra_helm_args=(
+            "--set statefulset.replicas=1 "
+            "--set tls.enabled=false "
+            "--set tls.certs.selfSigner.enabled=false "
+            "--set tls.certs.selfSigner.rotateCerts=false "
+            "--set storage.persistentVolume.size=1Gi "
+            "--set storage.persistentVolume.storageClass=openebs-hostpath "
+            "--set statefulset.resources.requests.cpu=250m "
+            "--set statefulset.resources.requests.memory=512Mi "
+            "--set statefulset.resources.limits.cpu=1 "
+            "--set statefulset.resources.limits.memory=1Gi"
+        ),
+        run_reproducer_fn=_cockroachdb_run_reproducer,
+        reproducer_workload_fn=_cockroachdb_reproducer_workload,
+    ),
+    # cockroachdb/errors is a Go library embedded in CockroachDB.  Bugs there
+    # manifest via SQL on a running CockroachDB cluster, so deployment is
+    # identical to the cockroachdb spec.  The source tree cloned is the errors
+    # library itself (for LLM diagnosis), while the stock base image is still
+    # cockroachdb/cockroach — _nearest_released_version normalises any library
+    # semver that doesn't match a real Docker Hub tag.
+    "cockroachdb_errors": DBBuildSpec(
+        name="cockroachdb_errors",
+        repo_url="https://github.com/cockroachdb/errors",
+        github_repo="cockroachdb/errors",
+        version_tag_pattern="v{version}",
+        build_image="golang:1.22",
+        build_cmd="true",
+        artifact_glob="UNUSED",
+        base_image="cockroachdb/cockroach:v{version}",
+        artifact_dest="/cockroach/cockroach",
+        prebuilt_from_stock=True,
+        operator_helm_repo="cockroachdb",
+        operator_helm_repo_url="https://charts.cockroachdb.com/",
+        operator_chart="cockroachdb/cockroachdb",
+        operator_namespace="cockroachdb",
+        default_cluster_name="sregym-cockroachdb",
+        cr_kind="",
+        cluster_manifest_fn=None,
+        image_patch_fn=_cockroachdb_image_patch,
+        helm_deploy_chart=True,
         operator_extra_helm_args=(
             "--set statefulset.replicas=1 "
             "--set tls.enabled=false "

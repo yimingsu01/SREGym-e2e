@@ -179,6 +179,10 @@ class GenericCustomBuildProblem(Problem):
     # cluster state while the stock binary is still running), then swap to the
     # buggy binary and wait for a crash-loop rather than a Ready pod.
     crash_on_startup: bool = False
+    # SQL / cluster-setting commands to run before the main reproducer (e.g. to
+    # force a schema change job to fail and roll back). Populated from the issue
+    # body in auto mode; can be overridden in hand-crafted mode.
+    _setup_preconditions_sql: str | None = None
 
     # ── Init ─────────────────────────────────────────────────────────────────
 
@@ -254,6 +258,12 @@ class GenericCustomBuildProblem(Problem):
         Called during inject_fault() while the stock binary is still running.
         Typical uses: enable a feature flag, add a DDL index, insert seed data.
         """
+        if self._setup_preconditions_sql:
+            logger.info("[GenericCustomBuild] Running extracted setup_preconditions SQL")
+            try:
+                self.app.run_reproducer(self._setup_preconditions_sql)
+            except Exception as e:
+                logger.warning(f"[GenericCustomBuild] setup_preconditions SQL raised: {e}")
 
     @mark_fault_injected
     def inject_fault(self):
@@ -275,6 +285,7 @@ class GenericCustomBuildProblem(Problem):
             )
             self.app.inject_buggy_image(self._custom_image)
             logger.info("[GenericCustomBuild] Buggy image active")
+        self.setup_preconditions()
         if self.reproducer:
             logger.info("[GenericCustomBuild] Running reproducer to trigger bug")
             try:
@@ -307,6 +318,8 @@ class GenericCustomBuildProblem(Problem):
                 self.expected_output = parsed.expected_output
             if parsed.crash_on_startup:
                 self.crash_on_startup = True
+            if not self._setup_preconditions_sql and parsed.setup_preconditions:
+                self._setup_preconditions_sql = parsed.setup_preconditions
             return parsed.version, parsed.git_ref
 
         if self.db_version and self.source_git_ref:

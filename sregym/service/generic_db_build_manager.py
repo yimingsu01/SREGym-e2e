@@ -112,16 +112,29 @@ class GenericDBBuildManager:
         m = re.search(r"^go\s+(\d+\.\d+)", go_mod.read_text(), re.MULTILINE)
         if not m:
             return self.spec.build_image
-        detected = f"golang:{m.group(1)}"
+        go_ver = m.group(1)
+        detected = f"golang:{go_ver}"
         # Pin to Debian Bullseye (glibc 2.31) so the binary is compatible with
         # Alpine+glibc-compat base images (e.g. TiDB) that don't have glibc 2.32+.
         # The untagged golang:X.Y is now Bookworm (glibc 2.36) which produces
         # binaries that crash with "GLIBC_2.32 not found" in those containers.
+        # Fall back to -bookworm if -bullseye doesn't exist for this Go version.
         if not any(s in detected for s in ("-bullseye", "-bookworm", "-alpine", "-buster")):
-            detected += "-bullseye"
+            import subprocess as _sp
+            for suffix in ("-bullseye", "-bookworm"):
+                candidate = f"golang:{go_ver}{suffix}"
+                ok = _sp.run(
+                    f"docker manifest inspect {candidate}",
+                    shell=True, capture_output=True,
+                )
+                if ok.returncode == 0:
+                    detected = candidate
+                    break
+            else:
+                detected += "-bookworm"
         if detected != self.spec.build_image:
             logger.info(
-                f"[GenericBuildMgr] go.mod requires Go {m.group(1)} — "
+                f"[GenericBuildMgr] go.mod requires Go {go_ver} — "
                 f"overriding build image {self.spec.build_image!r} → {detected!r}"
             )
         return detected

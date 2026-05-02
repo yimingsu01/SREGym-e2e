@@ -73,6 +73,13 @@ class ParsedIssue:
     # Verbatim output the description claims the reproducer produces on a FIXED
     # binary. Used by reproducer_validator alongside buggy_output.
     correct_output: str | None = None
+    # SQL / cluster-setting commands to run before the main reproducer (e.g. to
+    # force a schema change job to fail and roll back). Populates
+    # setup_preconditions() in the generated problem file.
+    setup_preconditions: str | None = None
+    # Non-null when the bug requires infrastructure disruption beyond SQL.
+    # Currently only "node_kill" is supported.
+    fault_injection_type: str | None = None
 
 
 class GitHubIssueParser:
@@ -92,16 +99,18 @@ class GitHubIssueParser:
 
         git_ref, is_commit = self._find_ref(issue, text, spec)
         version = self._extract_version(text, issue, spec)
-        reproducer, expected_output, buggy_output, correct_output, crash_on_startup = (
+        reproducer, expected_output, buggy_output, correct_output, setup_preconditions, crash_on_startup, fault_injection_type = (
             extract_reproducer_full(body)
         )
-        if reproducer or crash_on_startup:
+        if reproducer or crash_on_startup or fault_injection_type:
             logger.info(
                 f"[IssueParser] Extracted reproducer ({len(reproducer) if reproducer else 0} chars)"
                 + (f", expected_output={expected_output!r}" if expected_output else "")
                 + (f", buggy_output={buggy_output!r}" if buggy_output else "")
                 + (f", correct_output={correct_output!r}" if correct_output else "")
+                + (f", setup_preconditions={setup_preconditions!r}" if setup_preconditions else "")
                 + (", crash_on_startup=True" if crash_on_startup else "")
+                + (f", fault_injection_type={fault_injection_type!r}" if fault_injection_type else "")
             )
 
         logger.info(
@@ -120,6 +129,8 @@ class GitHubIssueParser:
             crash_on_startup=crash_on_startup,
             buggy_output=buggy_output,
             correct_output=correct_output,
+            setup_preconditions=setup_preconditions,
+            fault_injection_type=fault_injection_type,
         )
 
     # ── Ref resolution (fallback chain) ──────────────────────────────────────

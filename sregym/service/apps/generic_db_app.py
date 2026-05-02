@@ -200,6 +200,85 @@ class GenericDBApplication:
         else:
             logger.warning(f"No run_reproducer_fn defined for {self.spec.name} — skipping")
 
+    def run_reproducer_background(self, reproducer: str) -> subprocess.Popen:
+        """Fire-and-forget: start the reproducer in a background process and return immediately.
+
+        Useful when the reproducer must be running concurrently with a fault
+        (e.g. kill a node mid-schema-change to trigger a rollback path).
+        The caller is responsible for waiting on or terminating the returned Popen object.
+        """
+        if not self.spec.run_reproducer_fn:
+            raise RuntimeError(f"No run_reproducer_fn defined for {self.spec.name}")
+        import tempfile, os
+        # Write the reproducer to a temp file so the subprocess can read it
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False)
+        tmp.write(reproducer)
+        tmp.flush()
+        tmp.close()
+        cmd = self.spec.run_reproducer_fn.__module__  # not used — build cmd manually below
+
+        # Resolve the shell command the same way run_reproducer_fn does, but
+        # launch it in a Popen instead of waiting for it.
+        # We re-use run_reproducer_fn by running it in a thread so any DB-specific
+        # logic (e.g. mongosh vs cockroach sql) is preserved.
+        import threading
+        result_holder = {}
+        def _run_in_thread():
+            try:
+                self.spec.run_reproducer_fn(self.cluster_name, self.namespace, reproducer)
+                result_holder["done"] = True
+            except Exception as e:
+                result_holder["error"] = e
+
+        t = threading.Thread(target=_run_in_thread, daemon=True)
+        t.start()
+        os.unlink(tmp.name)
+        logger.info(f"[{self.spec.name}] reproducer started in background thread")
+        return t
+
+    def kill_pod(self, pod_name: str, wait: bool = True):
+        """Delete a specific pod by name and optionally wait for it to be replaced.
+
+        The cluster operator will restart the pod automatically. If wait=True,
+        blocks until a pod with the same app label is Running and Ready again.
+        """
+        ns = self.namespace
+        # Grab the app label from the pod before deleting it
+        label_out = subprocess.run(
+            f"kubectl get pod {pod_name} -n {ns} "
+            f"--no-headers -o jsonpath='{{.metadata.labels.app\\.kubernetes\\.io/instance}}'",
+            shell=True, capture_output=True, text=True,
+        ).stdout.strip() or self.cluster_name
+
+        logger.info(f"[{self.spec.name}] Killing pod {pod_name} in {ns}")
+        _run(f"kubectl delete pod {pod_name} -n {ns} --grace-period=0 --force", check=False)
+
+        if wait:
+            logger.info(f"[{self.spec.name}] Waiting for cluster to recover after pod kill")
+            self._wait_for_cluster_ready()
+
+    def kill_random_db_pod(self, wait: bool = True):
+        """Delete a random database pod and optionally wait for the cluster to recover.
+
+        Useful for triggering failure/rollback paths in schema change jobs, leader
+        elections, and other operations that only surface bugs under node loss.
+        """
+        out = _run(
+            f"kubectl get pods -n {self.namespace} "
+            f"-l app.kubernetes.io/instance={self.cluster_name} "
+            f"--no-headers -o custom-columns=NAME:.metadata.name",
+            check=False,
+        )
+        pods = [p.strip() for p in out.splitlines() if p.strip()]
+        if not pods:
+            raise RuntimeError(
+                f"No pods found for cluster {self.cluster_name!r} in {self.namespace!r}"
+            )
+        import random
+        victim = random.choice(pods)
+        logger.info(f"[{self.spec.name}] Randomly selected pod to kill: {victim}")
+        self.kill_pod(victim, wait=wait)
+
     def deploy_continuous_reproducer(self, reproducer: str, expected_output: str | None = None):
         """Deploy a Deployment on the cluster that runs the reproducer in a loop."""
         if not self.spec.reproducer_workload_fn:

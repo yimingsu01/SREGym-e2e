@@ -57,20 +57,29 @@ def _extract_json(raw: str) -> dict | None:
 
 # ── Regex fallback (used when LLM is unavailable) ────────────────────────────
 
+# Matches both markdown heading (## To Reproduce) and bold (**To Reproduce:**) formats.
 _REPRO_SECTION_RE = re.compile(
-    r"(?:^|\n)#{1,4}\s*(?:steps?\s+to\s+reproduc|reproduc|how\s+to\s+reproduc)[^\n]*\n"
-    r"(.*?)(?=\n#{1,4}\s|\Z)",
+    r"(?:^|\n)"
+    r"(?:#{1,4}\s*|\*{1,2})?"
+    r"(?:steps?\s+to\s+reproduc|to\s+reproduc|how\s+to\s+reproduc|reproduc)[^\n]*"
+    r"(?:\*{1,2})?\s*:?\s*\n"
+    r"(.*?)(?=\n(?:#{1,4}\s|\*{1,2}\S)|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 _CODE_BLOCK_RE = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
-_EXEC_LANGS = {"sql", "mysql", "cql", "cqlsh", "bash", "sh", "shell", "python", "py", "go", ""}
+# Untagged blocks ("") are excluded: they're commonly used for error output, not executable code.
+_EXEC_LANGS = {"sql", "mysql", "cql", "cqlsh", "bash", "sh", "shell", "python", "py", "go"}
 
 
 def _regex_extract(body: str) -> str | None:
     for section in _REPRO_SECTION_RE.finditer(body):
-        for m in _CODE_BLOCK_RE.finditer(section.group(1)):
-            if m.group(1).lower() in _EXEC_LANGS:
-                return m.group(2).strip()
+        blocks = [
+            m.group(2).strip()
+            for m in _CODE_BLOCK_RE.finditer(section.group(1))
+            if m.group(1).lower() in _EXEC_LANGS
+        ]
+        if blocks:
+            return "\n\n".join(blocks)
     for m in _CODE_BLOCK_RE.finditer(body):
         if m.group(1).lower() in _EXEC_LANGS:
             return m.group(2).strip()
@@ -189,69 +198,219 @@ def _sanity_check_reproducer(
 # ── LLM extraction ────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
-You are a helpful assistant that reads database bug reports and produces a minimal reproducer.
+You are a database reliability engineer who reads bug reports and writes complete, runnable
+reproduction scripts. Your job is not just to copy code from the issue — it is to REASON
+about what the full end-to-end reproduction flow must look like and SYNTHESIZE any missing
+steps using your knowledge of the database system.
 
-Bug reports commonly contain MULTIPLE code blocks that serve different purposes — the buggy
-reproducer, the expected/correct output, a workaround, a "this-also-works" contrast case, or
-even the fix itself. You must extract ONLY the block that triggers the bug against a live,
-unfixed binary — never a workaround, contrast case, expected-output display, or fix patch.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL DISTINCTION — reproducer vs. buggy_output
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Extract or synthesize these fields:
+  - The REPRODUCER is what you EXECUTE (SQL statements, shell commands).
+  - The BUGGY_OUTPUT is what the database PRINTS when the bug fires (error messages,
+    wrong query results, stack traces, validation failures).
+  - These are NEVER the same thing. A block that IS an error/stack trace is buggy_output,
+    not reproducer — even if it appears in a "To Reproduce" section.
+  - Signals that a block is buggy_output, not reproducer:
+      * Introduced by "observe:", "you will see:", "causes error:", "results in:", etc.
+      * Contains no executable SQL/shell — only error text or stack traces.
+      * Contains patterns like "ERROR:", "FATAL:", "panic:", "missing table=", etc.
 
-1. reproducer — a minimal script/command that TRIGGERS the bug on a live database.
-   Decision process:
-     a. If ONE code block is present, extract it verbatim (assuming it's executable).
-     b. If MULTIPLE code blocks are present, pick the one whose surrounding prose identifies it
-        as producing the WRONG / INCORRECT / BUGGY / UNEXPECTED output. SKIP any block whose
-        surrounding text says it:
-          - "returns correctly" / "works correctly" / "gives the correct result"
-          - "this is not affected" / "the workaround is" / "changed ... produces correct results"
-          - labels it as "expected" output (vs "actual" output)
-          - shows the fix / patch / suggested change
-     c. If only prose steps are given, SYNTHESIZE a minimal script following those steps.
-        Use mongosh JavaScript for MongoDB (db.collection.insertMany, db.collection.aggregate,
-        db.aggregate([{$documents: [...]}, ...]) for collection-less pipelines).
-        Use SQL for TiDB/MySQL (CREATE TABLE, INSERT, SELECT).
-     d. Return NONE for: startup/bootstrap crashes; bugs needing external tools (BR, Lightning,
-        PITR, TiFlash, physical backup/restore, network faults); bugs needing a sharded cluster;
-        or when no executable block exists.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BUILDING THE REPRODUCER — extraction and synthesis rules
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-2. buggy_output — the LITERAL output the REPRODUCER produces on an UNFIXED binary, per the
-   description. Copy verbatim from the "actual" / "we get" / "returns" / "got instead" block.
-   Preserve mongosh formatting (single quotes, ISODate(...), ObjectId(...), cursor arrays).
-   null if the description doesn't spell out the wrong output.
+Step 1 — Gather all executable code blocks from the "To Reproduce" section (or the
+whole issue if no such section exists). Concatenate them in order; skip blocks that
+are clearly error/output, not commands.
 
-3. correct_output — the LITERAL output the reproducer SHOULD produce on a FIXED binary.
-   Copy verbatim from "expected" / "should return" / "correct answer" / "expected answer".
+Step 2 — Read the surrounding PROSE for each step. If a step says something like
+"do X in a way that causes Y failure" or "inject a failure" or "force a rollback"
+or "observe the validation error", that prose is telling you the SCRIPT IS INCOMPLETE
+— you must synthesize the missing SQL to actually trigger that failure mode.
+
+Step 3 — Fill in every gap using the DB-specific synthesis patterns below. A reproducer
+is only done when running it top-to-bottom on an UNFIXED binary actually fires the bug
+and produces the buggy_output.
+
+Step 4 — Add a verification query at the end when the bug is a corruption/silent-wrong-
+result: the query should SELECT the value that exposes the bad state (invalid objects,
+wrong count, orphaned descriptor, etc.).
+
+Return NONE only for: startup/bootstrap crashes (use crash_on_startup instead); bugs
+requiring external tools (BR, Lightning, PITR, TiFlash, network faults, physical
+backup/restore); bugs needing a sharded cluster; or when there is genuinely no
+executable form.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DB-SPECIFIC SYNTHESIS PATTERNS — use these to fill in missing steps
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+■ CockroachDB
+
+  NEVER use crdb_internal or system tables in the reproducer — they are restricted in
+  production CockroachDB ("Access to crdb_internal and system is restricted").
+  Use information_schema equivalents instead:
+    crdb_internal.invalid_objects       → information_schema.table_constraints
+    crdb_internal.jobs / [SHOW JOBS]    → [SHOW JOBS] is fine (it is a CockroachDB extension)
+    system.*                            → avoid entirely
+
+  Legacy schema changer (bug is "in the legacy schema changer" or "legacy changer"):
+    -- Goes in setup_preconditions (cluster-wide, run once before reproducer):
+    SET CLUSTER SETTING sql.defaults.use_declarative_schema_changer = 'off';
+
+  Schema change job fails / rolls back — CRITICAL RACE CONDITION:
+    Schema change jobs for empty tables complete in milliseconds. A naive CANCEL JOBS
+    will always get "not cancelable" because the job already finished. You MUST freeze
+    job execution first so the job stays in 'pending' state long enough to cancel.
+
+    TRIGGER DETECTION — apply this pattern whenever ANY of the following is true:
+      • The issue title or body contains "rollback" near "schema change", "DDL", or "CREATE TABLE"
+      • The bug description says a rollback/cancel path has a bug (e.g., "rollback leaves
+        orphaned...", "rollback path does not clean up...", "missing cleanup in rollback")
+      • The "To Reproduce" steps show CREATE TABLE with REFERENCES/FOREIGN KEY but give NO
+        explicit mechanism to trigger a failure or rollback — the bug lives in the rollback
+        path, which is NEVER exercised by the CREATE TABLE succeeding normally
+      • The expected buggy output is a descriptor validation error, orphaned reference,
+        or "backreference" error
+    In ALL these cases: the literal CREATE TABLE sequence the issue shows is NOT a valid
+    reproducer. That code shows the schema — the rollback path is the actual bug trigger,
+    and you MUST synthesize the CANCEL JOBS mechanism to reach it.
+
+    Full reliable schema-change-rollback pattern:
+      -- In setup_preconditions (run once, persists across all iterations):
+      SET CLUSTER SETTING sql.defaults.use_declarative_schema_changer = 'off';
+
+      -- In reproducer (self-contained, runs in loop — manages async_exec_interval itself):
+      SET CLUSTER SETTING sql.schema_changer.async_exec_interval = '1h';
+      CREATE TABLE parent (id INT PRIMARY KEY);
+      CREATE TABLE child (id INT PRIMARY KEY, parent_id INT REFERENCES parent(id));
+      CANCEL JOBS (
+        SELECT job_id FROM [SHOW JOBS]
+        WHERE status = 'pending'
+          AND description LIKE '%child%'
+        ORDER BY created DESC LIMIT 1
+      );
+      SET CLUSTER SETTING sql.schema_changer.async_exec_interval = DEFAULT;
+      SELECT constraint_name, constraint_type
+      FROM information_schema.table_constraints
+      WHERE table_name = 'parent' AND constraint_type = 'FOREIGN KEY';
+
+    Why this works:
+      - async_exec_interval = '1h' at the START of each iteration prevents the job
+        scheduler from picking up the job, so it stays 'pending' and is always cancelable.
+      - Canceling a 'pending' job triggers rollbackSchemaChange(), which is the buggy path.
+      - Restoring DEFAULT at the END lets DROP DATABASE run between iterations.
+      - The final SELECT shows orphaned FK back-references on 'parent' if the bug fired.
+      - CRITICAL: async_exec_interval must be set INSIDE the reproducer (not only in
+        setup_preconditions) so it is re-applied on every loop iteration. Setting it only
+        in setup_preconditions means iteration 1 resets it to DEFAULT and iterations 2+
+        can no longer freeze jobs, so CANCEL JOBS finds nothing to cancel.
+
+  Transaction rollback (prose says "transaction is aborted", "rolled back"):
+    BEGIN; ...; ROLLBACK;
+
+  Wrong query result — EXPLAIN-based (issue shows bug via EXPLAIN plan comparison):
+    EXPLAIN / EXPLAIN (VERBOSE) output is NOT the reproducer — it is evidence of the bug.
+    You MUST synthesize a runnable reproducer that actually returns wrong data:
+      1. Keep the schema DDL as-is.
+      2. Extract the SELECT query by stripping the "EXPLAIN (VERBOSE)" prefix.
+      3. Synthesize INSERT statements with rows chosen so the omitted/wrong filter
+         changes the COUNT: e.g. if "tier IN (0, 1)" is wrongly dropped, insert a
+         row with tier=2 — it passes on a buggy binary but is filtered on a fixed one.
+      4. End the reproducer with: SELECT COUNT(*) FROM ... WHERE <the filter that the
+         bug drops>; — this turns an invisible plan mistake into a concrete wrong number.
+      5. Set buggy_output to the COUNT the buggy binary returns (e.g. "1").
+      6. Set correct_output to what a fixed binary returns (e.g. "0").
+      7. Set expected_output to the BUGGY count (same as buggy_output, e.g. "1").
+
+  Wrong query result — runtime (SELECT returns wrong rows without EXPLAIN):
+    End the reproducer with: SELECT COUNT(*) ... or SELECT <cols> ... that shows the wrong value.
+    Set buggy_output / correct_output / expected_output to the concrete numeric values.
+
+■ TiDB
+
+  Schema change / DDL rollback (prose says "DDL job fails", "rollback DDL"):
+    ADMIN CANCEL DDL JOBS <job_id>;
+    -- or find the job: ADMIN SHOW DDL JOBS;
+
+  Optimizer / wrong result (prose says "incorrect rows", "wrong result", "join reorder"):
+    ANALYZE TABLE t;  -- ensure stats are present so the optimizer reorders
+    SELECT ... (the query that returns the wrong result)
+    Set expected_output to the BUGGY count/value.
+
+  Disable optimization to compare:
+    SET tidb_opt_enable_mpp = 0;  -- (or the relevant session variable)
+
+■ MongoDB
+
+  Use mongosh JavaScript. For collection-less aggregations:
+    db.aggregate([{$documents: [...]}, {$group: ...}])
+  For change streams (bug fires on consumer side):
+    const cs = db.collection.watch([...]); cs.next();
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FIELDS TO EXTRACT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. reproducer — the complete runnable script that triggers the bug.
+   Must include every step: setup DDL, data insertion, the trigger mechanism
+   (CANCEL JOBS, ROLLBACK, etc.), and a final verification query.
+   Raw executable text only — no markdown fences, no numbered-step prose.
+
+2. setup_preconditions — SQL/cluster-setting commands that must run BEFORE the
+   main reproducer, while the cluster is in its initial state.
+   Use for: cluster-wide settings (SET CLUSTER SETTING ...), feature flags,
+   or seed state that must exist before the buggy image is active.
+   null if the reproducer is fully self-contained.
+
+3. buggy_output — verbatim output the REPRODUCER produces on an UNFIXED binary.
+   Copy from "actual" / "we get" / "returns" / "got instead" / "observe the error".
    null if not spelled out.
 
-4. expected_output — the value the readiness probe will grep for.
-   For MongoDB wrong-result bugs: copy buggy_output verbatim (probe matches on buggy binary).
-   For SQL wrong-result bugs: use `mysql --batch --skip-column-names` format — tab-separated
-   columns, newline-separated rows, no headers, no prose.
-   null for crash/panic bugs or when not determinable.
+4. correct_output — verbatim output a FIXED binary would produce.
+   Copy from "expected" / "should return" / "correct answer".
+   null if not spelled out.
 
-5. crash_on_startup — true only if the bug causes the process to fail on startup. false otherwise.
+5. expected_output — value the readiness probe greps for (tab-separated, no headers).
+   For wrong-result bugs: the BUGGY value (probe matches when bug is active).
+   null for crash/corruption bugs.
 
-OUTPUT FORMAT — read carefully:
-Your ENTIRE response must be a single JSON object and nothing else. No prose before or
-after. No markdown code fences. No explanation of your reasoning. The response must
-start with `{` and end with `}` and be parseable by json.loads.
+6. crash_on_startup — true only if the process fails on startup. false otherwise.
 
-The object has EXACTLY these five keys:
-  {
-    "reproducer": "<raw SQL or shell script, or NONE>",
-    "buggy_output": "<verbatim actual-output from description, or null>",
-    "correct_output": "<verbatim expected-output from description, or null>",
-    "expected_output": "<probe-grep value, or null>",
-    "crash_on_startup": false
-  }
+7. fault_injection_type — infrastructure action required BEYOND SQL to trigger the bug.
+   - "node_kill": the bug only fires when a database node crashes mid-operation (e.g.
+     a schema change job fails because the coordinator node dies — not because it was
+     cancelled via SQL). Set this ONLY when the issue explicitly says the failure must
+     come from a node crash / process kill / hardware failure, AND the SQL-only patterns
+     above (CANCEL JOBS, ROLLBACK, etc.) cannot reproduce it.
+   - null: bug is reproducible with SQL alone (default — use for 99% of bugs, including
+     all CANCEL JOBS / ROLLBACK / wrong-result / crash-on-startup scenarios).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Your ENTIRE response must be a single JSON object. No prose before or after.
+No markdown fences. Start with `{`, end with `}`, parseable by json.loads.
+
+{
+  "reproducer": "<complete runnable script, or NONE>",
+  "setup_preconditions": "<pre-flight SQL/settings, or null>",
+  "buggy_output": "<verbatim actual output, or null>",
+  "correct_output": "<verbatim expected output, or null>",
+  "expected_output": "<probe-grep value, or null>",
+  "crash_on_startup": false,
+  "fault_injection_type": null
+}
 
 Rules:
-- reproducer: raw executable text only. No markdown fences. No numbered-step prose.
-- NEVER return a code block whose surrounding text identifies it as a workaround, contrast
-  case, expected-output display, or the fix — only the triggering code.
-- buggy_output / correct_output: copied verbatim — do not rephrase, summarize, or reformat.
+- NEVER put an error message, stack trace, or validation failure in reproducer.
+- NEVER return a workaround, contrast case, expected-output display, or the fix.
+- buggy_output / correct_output: copied verbatim — do not rephrase or reformat.
+- When in doubt about a missing step: synthesize it using the patterns above.
+  An incomplete reproducer that doesn't fire the bug is worse than a synthesized one.
 """
 
 _USER_TEMPLATE = """\
@@ -268,11 +427,14 @@ tab-separated values). Do NOT write a description like "3 rows of 0" — write "
 """
 
 
-def _llm_extract(body: str) -> tuple[str | None, str | None, str | None, str | None, bool]:
-    """Return (reproducer, expected_output, buggy_output, correct_output, crash_on_startup) via LLM."""
+_VALID_FAULT_INJECTION_TYPES = {"node_kill"}
+
+
+def _llm_extract(body: str) -> tuple[str | None, str | None, str | None, str | None, str | None, bool, str | None]:
+    """Return (reproducer, expected_output, buggy_output, correct_output, setup_preconditions, crash_on_startup, fault_injection_type) via LLM."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return None, None, None, None, False
+        return None, None, None, None, None, False, None
 
     try:
         import anthropic
@@ -282,7 +444,7 @@ def _llm_extract(body: str) -> tuple[str | None, str | None, str | None, str | N
         # plus _extract_json's fence/prose tolerance to keep the output parseable.
         message = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1536,
+            max_tokens=3000,
             system=_SYSTEM_PROMPT,
             messages=[
                 {"role": "user", "content": _USER_TEMPLATE.format(body=body[:6000])},
@@ -298,7 +460,7 @@ def _llm_extract(body: str) -> tuple[str | None, str | None, str | None, str | N
             logger.warning(
                 f"[ReproducerExtractor] LLM returned unparseable response — skipping extraction"
             )
-            return None, None, None, None, False
+            return None, None, None, None, None, False, None
         reproducer = data.get("reproducer") or None
         if reproducer and reproducer.strip().upper() == "NONE":
             reproducer = None
@@ -308,13 +470,17 @@ def _llm_extract(body: str) -> tuple[str | None, str | None, str | None, str | N
         expected = data.get("expected_output") or None
         buggy_output = data.get("buggy_output") or None
         correct_output = data.get("correct_output") or None
+        setup_preconditions = data.get("setup_preconditions") or None
         crash_on_startup = bool(data.get("crash_on_startup", False))
+        fault_injection_type = data.get("fault_injection_type") or None
+        if fault_injection_type not in _VALID_FAULT_INJECTION_TYPES:
+            fault_injection_type = None
         if not reproducer and not crash_on_startup:
             logger.warning(f"[ReproducerExtractor] LLM returned no reproducer. Raw: {raw[:300]}")
-        return reproducer, expected, buggy_output, correct_output, crash_on_startup
+        return reproducer, expected, buggy_output, correct_output, setup_preconditions, crash_on_startup, fault_injection_type
     except Exception as e:
         logger.warning(f"[ReproducerExtractor] LLM extraction failed: {e}")
-        return None, None, None, None, False
+        return None, None, None, None, None, False, None
 
 
 # ── LLM repair ────────────────────────────────────────────────────────────────
@@ -448,31 +614,35 @@ def extract_reproducer(body: str) -> tuple[str | None, str | None, bool]:
     Back-compat shim for callers that only need the three-field tuple.
     Prefer ``extract_reproducer_full`` when validation outputs are needed.
     """
-    r, e, _b, _c, c = extract_reproducer_full(body)
+    r, e, _b, _c, _s, c, _f = extract_reproducer_full(body)
     return r, e, c
 
 
 def extract_reproducer_full(
     body: str,
-) -> tuple[str | None, str | None, str | None, str | None, bool]:
-    """Return (reproducer, expected_output, buggy_output, correct_output, crash_on_startup).
+) -> tuple[str | None, str | None, str | None, str | None, str | None, bool, str | None]:
+    """Return (reproducer, expected_output, buggy_output, correct_output, setup_preconditions, crash_on_startup, fault_injection_type).
 
     ``buggy_output`` and ``correct_output`` are the verbatim output snippets the
     description claims the reproducer produces on an unfixed vs. fixed binary.
     They are used by ``reproducer_validator`` to verify the extracted reproducer
     actually triggers the bug — they do NOT flow into the generated problem file.
+    ``setup_preconditions`` is SQL / cluster-setting commands to run before the
+    main reproducer (e.g. to force a schema change job to fail and roll back).
+    ``fault_injection_type`` is non-null when the bug requires infrastructure
+    disruption beyond SQL (currently only "node_kill").
     """
     if not body:
-        return None, None, None, None, False
+        return None, None, None, None, None, False, None
 
     if _is_sentry_auto_filed(body):
         logger.warning(
             "[ReproducerExtractor] Issue body indicates Sentry-auto-filed crash "
             "telemetry — no replayable reproducer possible, skipping extraction"
         )
-        return None, None, None, None, False
+        return None, None, None, None, None, False, None
 
-    reproducer, expected_output, buggy_output, correct_output, crash_on_startup = _llm_extract(body)
+    reproducer, expected_output, buggy_output, correct_output, setup_preconditions, crash_on_startup, fault_injection_type = _llm_extract(body)
     if not (reproducer or crash_on_startup):
         reproducer = _regex_extract(body)
         if reproducer:
@@ -488,10 +658,11 @@ def extract_reproducer_full(
             )
             reproducer = None
 
-    if reproducer or crash_on_startup:
+    if reproducer or crash_on_startup or fault_injection_type:
         logger.debug(
             f"[ReproducerExtractor] result: reproducer={len(reproducer) if reproducer else 0}chars "
             f"expected_output={expected_output!r} buggy_output={buggy_output!r} "
-            f"correct_output={correct_output!r} crash_on_startup={crash_on_startup}"
+            f"correct_output={correct_output!r} setup_preconditions={setup_preconditions!r} "
+            f"crash_on_startup={crash_on_startup} fault_injection_type={fault_injection_type!r}"
         )
-    return reproducer, expected_output, buggy_output, correct_output, crash_on_startup
+    return reproducer, expected_output, buggy_output, correct_output, setup_preconditions, crash_on_startup, fault_injection_type

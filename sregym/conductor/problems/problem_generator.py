@@ -179,27 +179,45 @@ class ProblemGenerator:
 
         if parsed.crash_on_startup:
             extra_attrs += "\n                crash_on_startup = True"
-            # Preconditions cannot be reliably auto-extracted; emit a stub.
-            # 16 spaces before 'def' → dedent strips 12 → 4 spaces in output (class body)
-            # 20 spaces before content → dedent strips 12 → 8 spaces in output (method body)
             extra_methods = (
                 f"\n\n                def setup_preconditions(self):\n"
                 f"                    pass  # TODO: self.app.run_reproducer(\"<command to enable the mode that causes the crash>\")"
             )
-        elif parsed.reproducer:
-            extra_attrs = (
-                f"\n                reproducer = {repr(parsed.reproducer)}"
-                f"\n                continuous_reproducer = True"
+        elif parsed.fault_injection_type == "node_kill":
+            # Bug requires killing a DB node mid-operation — emit an inject_fault
+            # override that runs the reproducer in the background, kills a pod, then joins.
+            if parsed.setup_preconditions:
+                extra_attrs += f"\n                _setup_preconditions_sql = {repr(parsed.setup_preconditions)}"
+            if parsed.reproducer:
+                extra_attrs += f"\n                reproducer = {repr(parsed.reproducer)}"
+            # 16 spaces before 'def' → dedent strips 12 → 4-space indent (class body)
+            # 20 spaces before body  → dedent strips 12 → 8-space indent (method body)
+            extra_methods = (
+                "\n\n                def inject_fault(self):\n"
+                "                    import time\n"
+                "                    self.setup_preconditions()\n"
+                "                    t = self.app.run_reproducer_background(self.reproducer)\n"
+                "                    time.sleep(3)\n"
+                "                    self.app.kill_random_db_pod(wait=True)\n"
+                "                    t.join(timeout=60)"
             )
+        elif parsed.reproducer:
+            if parsed.setup_preconditions:
+                extra_attrs += f"\n                _setup_preconditions_sql = {repr(parsed.setup_preconditions)}"
+            extra_attrs += f"\n                reproducer = {repr(parsed.reproducer)}"
+            continuous = not ProblemGenerator._reproducer_needs_dedicated_db(parsed.reproducer)
+            extra_attrs += f"\n                continuous_reproducer = {continuous}"
             if parsed.expected_output:
                 extra_attrs += f"\n                expected_output = {repr(parsed.expected_output)}"
+
+        imports = "from sregym.conductor.problems.generic_custom_build import GenericCustomBuildProblem"
 
         return textwrap.dedent(f'''\
             """Auto-generated from {issue_url}
 
             Title: {title}
             """
-            from sregym.conductor.problems.generic_custom_build import GenericCustomBuildProblem
+            {imports}
 
 
             class {class_name}(GenericCustomBuildProblem):
@@ -236,6 +254,21 @@ class ProblemGenerator:
         return f"Auto{db}{number}"
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    # Multi-region patterns that require a dedicated database context.
+    # _strip_sql_db_setup removes the CREATE DATABASE that sets these up, so
+    # the generic per-iteration workload loop would run in a plain database and
+    # never reach the actual bug trigger.
+    _DEDICATED_DB_RE = re.compile(
+        r"PRIMARY\s+REGION\b|LOCALITY\s+REGIONAL\b|crdb_internal_region",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _reproducer_needs_dedicated_db(reproducer: str) -> bool:
+        """Return True if the reproducer relies on database-level state
+        (e.g. multi-region) that the generic continuous workload can't recreate."""
+        return bool(ProblemGenerator._DEDICATED_DB_RE.search(reproducer))
 
     @staticmethod
     def _safe_description(parsed: ParsedIssue) -> str:
