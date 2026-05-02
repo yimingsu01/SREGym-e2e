@@ -785,6 +785,102 @@ def _cassandra_reproducer_workload(
     return _workload_manifest(cluster_name, namespace, "cassandra:4.1", loop_cmd, reproducer, "run.cql", probe_script)
 
 
+# ── etcd helpers ─────────────────────────────────────────────────────────────
+
+def _etcd_image_patch(_cluster: str, _ns: str, image: str) -> dict:
+    return {"spec": {"template": {"spec": {"containers": [{"name": "etcd", "image": image}]}}}}
+
+
+def _etcd_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> None:
+    import logging
+    import subprocess
+    log = logging.getLogger(__name__)
+    svc = f"{cluster_name}.{namespace}.svc.cluster.local"
+    endpoint = f"http://{svc}:2379"
+    pod = "etcd-repro-client"
+
+    log.info("[Reproducer] Running etcd reproducer via client pod")
+    try:
+        subprocess.run(
+            f"kubectl delete pod {pod} -n {namespace} --ignore-not-found",
+            shell=True, capture_output=True,
+        )
+        subprocess.run(
+            f"kubectl run {pod} --image=alpine:3.20 "
+            f"--restart=Never -n {namespace} "
+            f"-- sleep 3600",
+            shell=True, check=True, capture_output=True,
+        )
+        subprocess.run(
+            f"kubectl wait pod/{pod} -n {namespace} --for=condition=Ready --timeout=120s",
+            shell=True, check=True, capture_output=True,
+        )
+        subprocess.run(
+            f"kubectl exec {pod} -n {namespace} -- "
+            "sh -c 'wget -qO /tmp/etcd.tgz https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz && "
+            "tar xzf /tmp/etcd.tgz -C /tmp && cp /tmp/etcd-v3.5.17-linux-amd64/etcdctl /usr/local/bin/ && rm -rf /tmp/etcd*'",
+            shell=True, check=True, capture_output=True, timeout=120,
+        )
+        result = subprocess.run(
+            f"kubectl exec -i {pod} -n {namespace} -- "
+            f"sh -c 'export ETCDCTL_ENDPOINTS={endpoint}; sh'",
+            shell=True, input=reproducer,
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            log.info(f"[Reproducer] Completed: {result.stdout.strip()[:200]}")
+        else:
+            log.info(f"[Reproducer] Exited {result.returncode} (may be expected): {result.stderr.strip()[:300]}")
+    except Exception as e:
+        log.warning(f"[Reproducer] Error: {e}")
+    finally:
+        subprocess.run(
+            f"kubectl delete pod {pod} -n {namespace} --ignore-not-found --wait=false",
+            shell=True, capture_output=True,
+        )
+
+
+def _etcd_reproducer_workload(
+    cluster_name: str, namespace: str, reproducer: str, expected_output: str | None = None
+) -> str:
+    svc = f"{cluster_name}.{namespace}.svc.cluster.local"
+    endpoint = f"http://{svc}:2379"
+    install = (
+        "if ! command -v etcdctl >/dev/null 2>&1; then "
+        "wget -qO /tmp/etcd.tgz https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz && "
+        "tar xzf /tmp/etcd.tgz -C /tmp && cp /tmp/etcd-v3.5.17-linux-amd64/etcdctl /usr/local/bin/ && "
+        "rm -rf /tmp/etcd*; fi; "
+    )
+    loop_cmd = (
+        f"{install}"
+        f"export ETCDCTL_ENDPOINTS={endpoint}; "
+        "while true; do "
+        "sh /scripts/run.sh > /tmp/repro.out 2>&1; "
+        "echo $? > /tmp/probe_rc; "
+        "cat /tmp/repro.out; "
+        "sleep 10; done"
+    )
+    if expected_output:
+        safe = expected_output.replace("'", "'\\''")
+        probe_script = (
+            "#!/bin/sh\n"
+            "[ -f /tmp/repro.out ] || exit 1\n"
+            f"grep -qF '{safe}' /tmp/repro.out && exit 0\n"
+            "exit 1\n"
+        )
+    else:
+        probe_script = (
+            "#!/bin/sh\n"
+            "[ -f /tmp/probe_rc ] || exit 1\n"
+            '[ "$(cat /tmp/probe_rc)" = "0" ] && exit 0\n'
+            "exit 1\n"
+        )
+    return _workload_manifest(
+        cluster_name, namespace, "alpine:3.20",
+        loop_cmd, reproducer, "run.sh", probe_script,
+    )
+
+
 # ── Registry ─────────────────────────────────────────────────────────────────
 
 DB_REGISTRY: dict[str, DBBuildSpec] = {
@@ -982,5 +1078,48 @@ DB_REGISTRY: dict[str, DBBuildSpec] = {
         ),
         run_reproducer_fn=_cockroachdb_run_reproducer,
         reproducer_workload_fn=_cockroachdb_reproducer_workload,
+    "etcd": DBBuildSpec(
+        name="etcd",
+        repo_url="https://github.com/etcd-io/etcd",
+        github_repo="etcd-io/etcd",
+        version_tag_pattern="v{version}",
+        build_image="golang:1.24",
+        build_cmd="make build",
+        artifact_glob="bin/etcd",
+        base_image="quay.io/coreos/etcd:v{version}",
+        artifact_dest="/usr/local/bin/etcd",
+        operator_helm_repo="bitnami",
+        operator_helm_repo_url="https://charts.bitnami.com/bitnami",
+        operator_chart="bitnami/etcd",
+        operator_namespace="etcd",
+        default_cluster_name="sregym-etcd",
+        cr_kind="",
+        cluster_manifest_fn=None,
+        image_patch_fn=_etcd_image_patch,
+        helm_deploy_chart=True,
+        operator_extra_helm_args=(
+            "--set global.security.allowInsecureImages=true "
+            "--set replicaCount=1 "
+            "--set auth.rbac.create=false "
+            "--set auth.rbac.allowNoneAuthentication=true "
+            "--set persistence.size=1Gi "
+            "--set persistence.storageClass=standard "
+            "--set resources.requests.cpu=250m "
+            "--set resources.requests.memory=256Mi "
+            "--set resources.limits.cpu=1 "
+            "--set resources.limits.memory=512Mi "
+            "--set readinessProbe.enabled=false "
+            "--set livenessProbe.enabled=false "
+            "--set startupProbe.enabled=false "
+            "--set 'customReadinessProbe.exec.command={etcdctl,endpoint,health}' "
+            "--set customReadinessProbe.initialDelaySeconds=10 "
+            "--set customReadinessProbe.periodSeconds=10 "
+            "--set customLivenessProbe.httpGet.path=/livez "
+            "--set customLivenessProbe.httpGet.port=2379 "
+            "--set customLivenessProbe.initialDelaySeconds=30 "
+            "--set customLivenessProbe.periodSeconds=30"
+        ),
+        run_reproducer_fn=_etcd_run_reproducer,
+        reproducer_workload_fn=_etcd_reproducer_workload,
     ),
 }

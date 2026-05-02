@@ -49,6 +49,7 @@ class GenericDBApplication:
         version: str,
         cluster_name: str | None = None,
         initial_image: str | None = None,
+        extra_helm_args: str = "",
     ):
         self.spec = spec
         self.version = version
@@ -56,6 +57,7 @@ class GenericDBApplication:
         self.namespace = spec.operator_namespace
         self.name = spec.name
         self.initial_image = initial_image
+        self.extra_helm_args = extra_helm_args
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -328,15 +330,26 @@ class GenericDBApplication:
         # fullnameOverride pins the StatefulSet/Service names to cluster_name
         # so reproducer helpers resolve `{cluster_name}-public` deterministically.
         if self.spec.helm_deploy_chart:
-            image_tag = self.spec.git_ref(self.version)  # e.g. "v24.1.4"
-            image_repo = "cockroachdb/cockroach"  # chart default; overridden for custom images
+            stock = self.spec.resolved_base_image(self.version)
+            image_repo, _, image_tag = stock.rpartition(":")
             if custom_image:
                 repo, _, tag = custom_image.rpartition(":")
                 if repo and tag:
                     image_repo, image_tag = repo, tag
-            image_flags = (
-                f"--set image.repository={image_repo} --set image.tag={image_tag} "
-            )
+            # Bitnami charts split the image into registry + repository.
+            # Detect non-Docker-Hub registries (contain a dot before the
+            # first slash) and set image.registry separately.
+            parts = image_repo.split("/", 1)
+            if len(parts) == 2 and "." in parts[0]:
+                image_flags = (
+                    f"--set image.registry={parts[0]} "
+                    f"--set image.repository={parts[1]} "
+                    f"--set image.tag={image_tag} "
+                )
+            else:
+                image_flags = (
+                    f"--set image.repository={image_repo} --set image.tag={image_tag} "
+                )
             # No --wait for helm_deploy_chart: the cockroachdb chart ships a
             # separate ``cockroach init`` Job that bootstraps the cluster, and
             # the StatefulSet can't pass its readiness probe until that Job
@@ -349,7 +362,8 @@ class GenericDBApplication:
                 f"--create-namespace "
                 f"--set fullnameOverride={self.cluster_name} "
                 f"{image_flags}"
-                f"{self.spec.operator_extra_helm_args}"
+                f"{self.spec.operator_extra_helm_args} "
+                f"{self.extra_helm_args}"
             )
         else:
             helm_cmd = (
@@ -358,6 +372,7 @@ class GenericDBApplication:
                 f"--create-namespace "
                 f"--set global.clusterScoped=true "
                 f"{self.spec.operator_extra_helm_args} "
+                f"{self.extra_helm_args} "
                 f"--wait --timeout 5m"
             )
         for attempt in range(1, 4):

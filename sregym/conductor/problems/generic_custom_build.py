@@ -32,11 +32,13 @@ Problem lifecycle
   recover_fault() — no-op; conductor tears down the cluster between problems
 """
 
+import dataclasses
 import logging
 import re
 from pathlib import Path
 
 from sregym.conductor.oracles.llm_as_a_judge.llm_as_a_judge_oracle import LLMAsAJudgeOracle
+from sregym.conductor.oracles.reproducer_pod_mitigation import ReproducerPodMitigationOracle
 from sregym.conductor.problems.base import Problem
 from sregym.service.apps.generic_db_app import GenericDBApplication
 from sregym.service.db_build_spec import DB_REGISTRY, DBBuildSpec
@@ -183,6 +185,14 @@ class GenericCustomBuildProblem(Problem):
     # force a schema change job to fail and roll back). Populated from the issue
     # body in auto mode; can be overridden in hand-crafted mode.
     _setup_preconditions_sql: str | None = None
+    # Extra --set flags appended to the Helm install for this specific problem.
+    # Allows per-problem customization (e.g. persistence, env vars, sidecars)
+    # without modifying the shared DBBuildSpec.
+    extra_helm_args: str = ""
+    # Per-problem overrides for the build step.  When set, these replace the
+    # corresponding fields on the shared DBBuildSpec *for this problem only*.
+    build_cmd: str | None = None
+    build_image: str | None = None
 
     # ── Init ─────────────────────────────────────────────────────────────────
 
@@ -193,6 +203,15 @@ class GenericCustomBuildProblem(Problem):
                 f"Add an entry to DB_REGISTRY in db_build_spec.py."
             )
         spec: DBBuildSpec = DB_REGISTRY[self.db_name]
+
+        overrides = {}
+        if self.build_cmd is not None:
+            overrides["build_cmd"] = self.build_cmd
+        if self.build_image is not None:
+            overrides["build_image"] = self.build_image
+        if overrides:
+            spec = dataclasses.replace(spec, **overrides)
+            logger.info(f"[GenericCustomBuild] Per-problem spec overrides: {overrides}")
 
         version, git_ref = self._resolve_version_and_ref(spec)
         source_path = SourceManager().ensure_source(
@@ -236,7 +255,18 @@ class GenericCustomBuildProblem(Problem):
         else:
             self._predeployed_buggy = deploy_version != version
             initial_image = self._custom_image if self._predeployed_buggy else None
-        app = GenericDBApplication(spec, deploy_version, initial_image=initial_image)
+        app = GenericDBApplication(
+            spec, deploy_version,
+            initial_image=initial_image,
+            extra_helm_args=self.extra_helm_args,
+        )
+
+        _original_deploy = app.deploy
+        def _wrapped_deploy():
+            _original_deploy()
+            self.post_deploy()
+        app.deploy = _wrapped_deploy
+
         super().__init__(app=app, namespace=app.namespace)
 
         self.source_code_path = source_path
@@ -248,9 +278,25 @@ class GenericCustomBuildProblem(Problem):
         )
         self.root_cause = root_cause
         self.diagnosis_oracle = LLMAsAJudgeOracle(problem=self, expected=root_cause)
-        self.mitigation_oracle = None
+
+        if self.continuous_reproducer:
+            self.mitigation_oracle = ReproducerPodMitigationOracle(
+                problem=self,
+                cluster_name=app.cluster_name,
+                expect_unready=self.expected_output is not None,
+            )
+        else:
+            self.mitigation_oracle = None
 
     # ── Fault injection ───────────────────────────────────────────────────────
+
+    def post_deploy(self):
+        """Override to run actions after the cluster is deployed and ready.
+
+        Called at the end of app.deploy(). Typical uses: patch StatefulSet
+        for tmpfs volumes, add sidecars, apply settings that aren't
+        available via Helm values.
+        """
 
     def setup_preconditions(self):
         """Override to prepare cluster state before the buggy image is swapped in.

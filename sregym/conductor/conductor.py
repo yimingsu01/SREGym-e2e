@@ -36,7 +36,7 @@ class ConductorConfig:
 
     deploy_loki: bool = True
     deploy_openebs: bool = True
-    deploy_observability: bool = True  # Prometheus, Jaeger, OTel Collector
+    deploy_observability: bool = False  # Prometheus, Jaeger, OTel Collector
     enable_noise: bool = False
 
 

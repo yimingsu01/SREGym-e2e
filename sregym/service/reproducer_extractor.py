@@ -136,7 +136,8 @@ _PANIC_MARKERS = (
 _EXEC_KEYWORD_RE = re.compile(
     r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|USE|WITH|EXPLAIN|SHOW|"
     r"BEGIN|COMMIT|ROLLBACK|GRANT|REVOKE|LOAD|CALL|SET|TRUNCATE|VALUES|TABLE)\b"
-    r"|db\.|ObjectId\(|ISODate\(|\bsh\.|\brs\.|\buse\s+\w",
+    r"|db\.|ObjectId\(|ISODate\(|\bsh\.|\brs\.|\buse\s+\w"
+    r"|\betcdctl\b|\bcurl\b|\bexport\b|\bkill\b|\betcdutl\b",
     re.IGNORECASE,
 )
 
