@@ -1078,6 +1078,7 @@ DB_REGISTRY: dict[str, DBBuildSpec] = {
         ),
         run_reproducer_fn=_cockroachdb_run_reproducer,
         reproducer_workload_fn=_cockroachdb_reproducer_workload,
+    ),
     "etcd": DBBuildSpec(
         name="etcd",
         repo_url="https://github.com/etcd-io/etcd",
