@@ -14,6 +14,7 @@ This class handles any database whose operator follows the standard pattern:
 
 import json
 import logging
+import os
 import subprocess
 import time
 
@@ -398,7 +399,7 @@ class GenericDBApplication:
         _run("kubectl apply -f -", input=manifest)
         logger.info(f"{self.spec.name} cluster CR applied to '{self.namespace}'")
 
-    def _wait_for_cluster_ready(self, timeout: int = 600):
+    def _wait_for_cluster_ready(self, timeout: int | None = None):
         """Wait until the cluster's own pods are Ready.
 
         Uses app.kubernetes.io/instance={cluster_name}, which all major operators
@@ -407,7 +408,18 @@ class GenericDBApplication:
         Requires the pod count to be stable across two consecutive 15-second
         polls before declaring success.  This prevents returning early when the
         operator is still creating pods (e.g. PD ready before TiKV/TiDB exist).
+
+        The timeout defaults to 1200s (raise via the SREGYM_CLUSTER_READY_TIMEOUT
+        env var). A multi-node first boot — e.g. a 3-node K8ssandra cluster on a
+        cold kind node — can take ~11 minutes to reach all-pods-Ready, which
+        exceeded the previous 600s cap and made deploy() spuriously fail even
+        though the cluster came up healthy moments later.
         """
+        if timeout is None:
+            try:
+                timeout = int(os.environ.get("SREGYM_CLUSTER_READY_TIMEOUT", "1200"))
+            except ValueError:
+                timeout = 1200
         label = f"app.kubernetes.io/instance={self.cluster_name}"
         # Exclude one-shot Job pods that share the instance label but terminate
         # Completed/Failed — e.g. cockroachdb's cluster-init Job.  They can

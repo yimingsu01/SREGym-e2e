@@ -1,100 +1,65 @@
-https://issues.apache.org/jira/browse/CASSANDRA-20050
-https://issues.apache.org/jira/browse/CASSANDRA-21442
-https://issues.apache.org/jira/browse/CASSANDRA-21428
-https://issues.apache.org/jira/browse/CASSANDRA-21410
-https://issues.apache.org/jira/browse/CASSANDRA-21409
-https://issues.apache.org/jira/browse/CASSANDRA-21397
-https://issues.apache.org/jira/browse/CASSANDRA-21396
-https://issues.apache.org/jira/browse/CASSANDRA-21391
-https://issues.apache.org/jira/browse/CASSANDRA-21389
-https://issues.apache.org/jira/browse/CASSANDRA-21366
-https://issues.apache.org/jira/browse/CASSANDRA-21348
-https://issues.apache.org/jira/browse/CASSANDRA-21341
-https://issues.apache.org/jira/browse/CASSANDRA-21332
-https://issues.apache.org/jira/browse/CASSANDRA-21329
-https://issues.apache.org/jira/browse/CASSANDRA-21327
-https://issues.apache.org/jira/browse/CASSANDRA-21318
-https://issues.apache.org/jira/browse/CASSANDRA-21312
-https://issues.apache.org/jira/browse/CASSANDRA-21311
-https://issues.apache.org/jira/browse/CASSANDRA-21290
-https://issues.apache.org/jira/browse/CASSANDRA-21263
-https://issues.apache.org/jira/browse/CASSANDRA-21260
-https://issues.apache.org/jira/browse/CASSANDRA-21255
-https://issues.apache.org/jira/browse/CASSANDRA-21252
-https://issues.apache.org/jira/browse/CASSANDRA-21246
-https://issues.apache.org/jira/browse/CASSANDRA-21245
-https://issues.apache.org/jira/browse/CASSANDRA-21236
-https://issues.apache.org/jira/browse/CASSANDRA-21219
-https://issues.apache.org/jira/browse/CASSANDRA-21216
-https://issues.apache.org/jira/browse/CASSANDRA-21215
-https://issues.apache.org/jira/browse/CASSANDRA-21213
-https://issues.apache.org/jira/browse/CASSANDRA-21209
-https://issues.apache.org/jira/browse/CASSANDRA-21189
-https://issues.apache.org/jira/browse/CASSANDRA-21188
-https://issues.apache.org/jira/browse/CASSANDRA-21187
-https://issues.apache.org/jira/browse/CASSANDRA-21185
-https://issues.apache.org/jira/browse/CASSANDRA-21182
-https://issues.apache.org/jira/browse/CASSANDRA-21176
-https://issues.apache.org/jira/browse/CASSANDRA-21173
-https://issues.apache.org/jira/browse/CASSANDRA-21166
-https://issues.apache.org/jira/browse/CASSANDRA-21163
-https://issues.apache.org/jira/browse/CASSANDRA-21152
-https://issues.apache.org/jira/browse/CASSANDRA-21151
-https://issues.apache.org/jira/browse/CASSANDRA-21150
-https://issues.apache.org/jira/browse/CASSANDRA-21145
-https://issues.apache.org/jira/browse/CASSANDRA-21144
-https://issues.apache.org/jira/browse/CASSANDRA-21143
-https://issues.apache.org/jira/browse/CASSANDRA-21142
-https://issues.apache.org/jira/browse/CASSANDRA-21135
-https://issues.apache.org/jira/browse/CASSANDRA-21132
-https://issues.apache.org/jira/browse/CASSANDRA-21130
-https://issues.apache.org/jira/browse/CASSANDRA-21115
-https://issues.apache.org/jira/browse/CASSANDRA-21112
-https://issues.apache.org/jira/browse/CASSANDRA-21110
-https://issues.apache.org/jira/browse/CASSANDRA-21102
-https://issues.apache.org/jira/browse/CASSANDRA-21092
-https://issues.apache.org/jira/browse/CASSANDRA-21087
-https://issues.apache.org/jira/browse/CASSANDRA-21079
-https://issues.apache.org/jira/browse/CASSANDRA-21077
-https://issues.apache.org/jira/browse/CASSANDRA-21074
-https://issues.apache.org/jira/browse/CASSANDRA-21065
-https://issues.apache.org/jira/browse/CASSANDRA-21061
-https://issues.apache.org/jira/browse/CASSANDRA-21057
-https://issues.apache.org/jira/browse/CASSANDRA-21056
-https://issues.apache.org/jira/browse/CASSANDRA-21055
-https://issues.apache.org/jira/browse/CASSANDRA-21054
-https://issues.apache.org/jira/browse/CASSANDRA-21052
-https://issues.apache.org/jira/browse/CASSANDRA-21047
-https://issues.apache.org/jira/browse/CASSANDRA-21046
-https://issues.apache.org/jira/browse/CASSANDRA-21045
-https://issues.apache.org/jira/browse/CASSANDRA-21044
-https://issues.apache.org/jira/browse/CASSANDRA-21037
-https://issues.apache.org/jira/browse/CASSANDRA-21035
-https://issues.apache.org/jira/browse/CASSANDRA-21033
-https://issues.apache.org/jira/browse/CASSANDRA-21032
-https://issues.apache.org/jira/browse/CASSANDRA-21025
-https://issues.apache.org/jira/browse/CASSANDRA-21009
-https://issues.apache.org/jira/browse/CASSANDRA-21005
-https://issues.apache.org/jira/browse/CASSANDRA-21004
-https://issues.apache.org/jira/browse/CASSANDRA-21003
-https://issues.apache.org/jira/browse/CASSANDRA-21002
-https://issues.apache.org/jira/browse/CASSANDRA-20992
-https://issues.apache.org/jira/browse/CASSANDRA-20983
-https://issues.apache.org/jira/browse/CASSANDRA-20982
-https://issues.apache.org/jira/browse/CASSANDRA-20979
-https://issues.apache.org/jira/browse/CASSANDRA-20978
-https://issues.apache.org/jira/browse/CASSANDRA-20976
-https://issues.apache.org/jira/browse/CASSANDRA-20972
-https://issues.apache.org/jira/browse/CASSANDRA-20944
-https://issues.apache.org/jira/browse/CASSANDRA-20934
-https://issues.apache.org/jira/browse/CASSANDRA-20917
-https://issues.apache.org/jira/browse/CASSANDRA-20915
-https://issues.apache.org/jira/browse/CASSANDRA-20904
-https://issues.apache.org/jira/browse/CASSANDRA-20898
-https://issues.apache.org/jira/browse/CASSANDRA-20887
-https://issues.apache.org/jira/browse/CASSANDRA-20877
-https://issues.apache.org/jira/browse/CASSANDRA-20875
-https://issues.apache.org/jira/browse/CASSANDRA-20874
-https://issues.apache.org/jira/browse/CASSANDRA-20872
-https://issues.apache.org/jira/browse/CASSANDRA-20871
-https://issues.apache.org/jira/browse/CASSANDRA-20870
+# Apache Cassandra bugs — DB-behavior subset for SREGym reproduction.
+# Filtered from the original 100: EXCLUDES CI/test-infra, test-only logic, and
+# internal tooling (nodetool/JMX/CCM/cassandra-stress/virtual-table internals).
+# Grouped by category; within each, deployable-on-a-released-image bugs are listed
+# first (buggy version in brackets), then trunk-only bugs (no released image yet).
+# Total DB-behavior bugs: 51.
+
+## CQL semantics (reproduce all) — 13 bugs (7 deployable)
+1. https://issues.apache.org/jira/browse/CASSANDRA-20050  # buggy 4.0.14
+2. https://issues.apache.org/jira/browse/CASSANDRA-20871  # buggy 4.0.19
+3. https://issues.apache.org/jira/browse/CASSANDRA-20915  # buggy 4.0.18
+4. https://issues.apache.org/jira/browse/CASSANDRA-20982  # buggy 4.0.19
+5. https://issues.apache.org/jira/browse/CASSANDRA-21219  # buggy 5.0.6
+6. https://issues.apache.org/jira/browse/CASSANDRA-21332  # buggy 5.0.8
+7. https://issues.apache.org/jira/browse/CASSANDRA-21348  # buggy 5.0.8
+8. https://issues.apache.org/jira/browse/CASSANDRA-21045  # trunk-only (no released image)
+9. https://issues.apache.org/jira/browse/CASSANDRA-21046  # trunk-only (no released image)
+10. https://issues.apache.org/jira/browse/CASSANDRA-21055  # trunk-only (no released image)
+11. https://issues.apache.org/jira/browse/CASSANDRA-21061  # trunk-only (no released image)
+12. https://issues.apache.org/jira/browse/CASSANDRA-21112  # trunk-only (no released image)
+13. https://issues.apache.org/jira/browse/CASSANDRA-21152  # trunk-only (no released image)
+
+## Storage engine (compaction/sstable/memtable/compression) — 9 bugs (5 deployable)
+14. https://issues.apache.org/jira/browse/CASSANDRA-20917  # buggy 5.0.5
+15. https://issues.apache.org/jira/browse/CASSANDRA-20972  # buggy 5.0.5
+16. https://issues.apache.org/jira/browse/CASSANDRA-20976  # buggy 5.0.5
+17. https://issues.apache.org/jira/browse/CASSANDRA-21065  # buggy 5.0.6
+18. https://issues.apache.org/jira/browse/CASSANDRA-21245  # buggy 5.0.8
+19. https://issues.apache.org/jira/browse/CASSANDRA-21047  # trunk-only (no released image)
+20. https://issues.apache.org/jira/browse/CASSANDRA-21188  # trunk-only (no released image)
+21. https://issues.apache.org/jira/browse/CASSANDRA-21255  # trunk-only (no released image)
+22. https://issues.apache.org/jira/browse/CASSANDRA-21260  # trunk-only (no released image)
+
+## Distributed / multi-node (gossip/streaming/repair/topology) — 23 bugs (4 deployable)
+23. https://issues.apache.org/jira/browse/CASSANDRA-20877  # buggy 4.0.19
+24. https://issues.apache.org/jira/browse/CASSANDRA-21092  # buggy 5.0.6
+25. https://issues.apache.org/jira/browse/CASSANDRA-21132  # buggy 5.0.6
+26. https://issues.apache.org/jira/browse/CASSANDRA-21428  # buggy 4.0.20
+27. https://issues.apache.org/jira/browse/CASSANDRA-20872  # trunk-only (no released image)
+28. https://issues.apache.org/jira/browse/CASSANDRA-20887  # trunk-only (no released image)
+29. https://issues.apache.org/jira/browse/CASSANDRA-20983  # trunk-only (no released image)
+30. https://issues.apache.org/jira/browse/CASSANDRA-21002  # trunk-only (no released image)
+31. https://issues.apache.org/jira/browse/CASSANDRA-21003  # trunk-only (no released image)
+32. https://issues.apache.org/jira/browse/CASSANDRA-21005  # trunk-only (no released image)
+33. https://issues.apache.org/jira/browse/CASSANDRA-21025  # trunk-only (no released image)
+34. https://issues.apache.org/jira/browse/CASSANDRA-21033  # trunk-only (no released image)
+35. https://issues.apache.org/jira/browse/CASSANDRA-21035  # trunk-only (no released image)
+36. https://issues.apache.org/jira/browse/CASSANDRA-21102  # trunk-only (no released image)
+37. https://issues.apache.org/jira/browse/CASSANDRA-21115  # trunk-only (no released image)
+38. https://issues.apache.org/jira/browse/CASSANDRA-21142  # trunk-only (no released image)
+39. https://issues.apache.org/jira/browse/CASSANDRA-21143  # trunk-only (no released image)
+40. https://issues.apache.org/jira/browse/CASSANDRA-21144  # trunk-only (no released image)
+41. https://issues.apache.org/jira/browse/CASSANDRA-21187  # trunk-only (no released image)
+42. https://issues.apache.org/jira/browse/CASSANDRA-21216  # trunk-only (no released image)
+43. https://issues.apache.org/jira/browse/CASSANDRA-21236  # trunk-only (no released image)
+44. https://issues.apache.org/jira/browse/CASSANDRA-21252  # trunk-only (no released image)
+45. https://issues.apache.org/jira/browse/CASSANDRA-21341  # trunk-only (no released image)
+
+## Other runtime DB behavior (startup/config/guardrails) — 6 bugs (3 deployable)
+46. https://issues.apache.org/jira/browse/CASSANDRA-21057  # buggy 4.1.10
+47. https://issues.apache.org/jira/browse/CASSANDRA-21290  # buggy 4.1.11
+48. https://issues.apache.org/jira/browse/CASSANDRA-21389  # buggy 4.0.20
+49. https://issues.apache.org/jira/browse/CASSANDRA-20978  # trunk-only (no released image)
+50. https://issues.apache.org/jira/browse/CASSANDRA-21409  # trunk-only (no released image)
+51. https://issues.apache.org/jira/browse/CASSANDRA-21410  # trunk-only (no released image)

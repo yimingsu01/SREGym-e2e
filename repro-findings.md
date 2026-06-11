@@ -1,14 +1,15 @@
-# Reproduction findings — bugs.txt (100 Apache Cassandra Jira issues)
+# Reproduction findings — bugs.txt (Apache Cassandra DB-behavior bugs)
 
 Two kinds of findings are recorded here:
-1. **Bugs in the SREGym reproduction tooling** that block the skill's automatic path. Per the
-   session instruction these are **only documented, not fixed**.
+1. **Bugs in the SREGym reproduction tooling** that block the skill's automatic path. These were
+   originally documented only; **they have since been FIXED — see Part 5 for the fixes and their
+   validation.**
 2. **Findings about the 100 Cassandra bugs themselves** — how many are actually reproducible in a
    kind cluster, and the reproduction(s) that were achieved.
 
 ---
 
-## Part 1 — Bugs found in the SREGym tooling (NOT fixed this session)
+## Part 1 — Bugs found in the SREGym tooling (✅ now FIXED — see Part 5)
 
 ### BUG-1 (blocker): Jira parser unpacks 5 values from a 7-tuple
 - **Location:** `sregym/service/jira_issue_parser.py:56-58`
@@ -63,97 +64,168 @@ Two kinds of findings are recorded here:
   yields **empty every time** — even for issues that contain a perfectly good `{code}` reproducer
   (e.g. CASSANDRA-20050, CASSANDRA-21046).
 
-> Net: the skill's **automatic** path is unusable for these 100 Jira issues. Reproduction must use
-> the skill's documented **hand-crafted** mode (`db_version` + `source_git_ref` + explicit
-> `reproducer`), which bypasses the Jira parser and the extractor. That is the path used below.
+> Net (at the time of triage): the skill's **automatic** path was unusable for these Jira issues, so
+> reproduction used the skill's documented **hand-crafted** mode (`db_version` + `source_git_ref` +
+> explicit `reproducer`), which bypasses the Jira parser and the extractor. **Update:** BUG-1/2/3 are
+> now fixed (Part 5), so the automatic path now parses these Jira issues end-to-end (verified for
+> CASSANDRA-20050: `version=4.0.14`, clean reproducer extracted).
 
 ---
 
-## Part 2 — Reproducibility of the 100 Cassandra bugs
 
-All 100 entries are Apache Jira `Bug`-type issues. They were fetched via the public Jira REST API
-and triaged (raw JSON cached in `/tmp/jira_issues/`).
+## Part 2 — Re-scope of bugs.txt to DB-behavior bugs (51)
 
-### Two hard gates for "reproducible in kind via the skill"
-1. **Deployable image:** the buggy build must sit on a real `k8ssandra/cass-management-api:<ver>-ubi8`
-   base image. That requires the fix to have shipped in a **released** `X.Y.Z` version (so the
-   version just below it is a released, image-backed buggy version).
-   - **36 / 100** have a released `X.Y.Z` fix version.
-   - **64 / 100** were fixed only in `6.0-alpha*` / `6.0` / `7.x` / trunk → **no deployable base
-     image** → cannot be deployed by the skill's K8ssandra path.
-2. **cqlsh-triggerable:** the bug must be triggerable by a short CQL sequence against a single
-   freshly-deployed node (no multi-node repair/streaming/gossip, no JVM unit-test harness, no
-   special flush/compaction timing).
+`bugs.txt` was re-triaged (all 100 cached Jira issues, JSON in `/tmp/jira_issues/`) and rewritten to
+contain **only database-behavior bugs**, dropping CI/test-logic and internal-tooling issues per the
+request. Re-classification used a strict rubric (5 parallel sub-agents over self-contained inputs).
 
-### Category breakdown (by Jira components + description)
-| Category | Count | cqlsh-reproducible on a single node? |
-| --- | --- | --- |
-| ci-test-infra (junit XML, CI config, flaky/dtest) | 27 | No |
-| other-internal (internal logic seen in tests) | 32 | No |
-| distributed-multinode (repair / streaming / gossip / coordination) | 12 | No |
-| internal-tooling (nodetool / metrics / virtual tables / messaging) | 8 | Rarely |
-| storage-engine (compaction / sstable / memtable / commitlog) | 7 | Rarely (needs flush+compaction sequencing) |
-| cql-semantics (CQL/Semantics, CQL/Syntax, Feature/*) | 14 | Some — the only real candidates |
-| **Total** | **100** | |
+Final categories kept (`is_db_behavior = yes`): **51 bugs**
+- cql-semantics: 13
+- storage-engine: 9
+- distributed-multinode: 23
+- other-db-behavior: 6
 
-Intersection of **cql-semantics ∧ released fix ∧ in-description CQL reproducer = 1 issue:
-CASSANDRA-20050.** A handful of other cql-semantics issues have released fixes but no ready CQL
-reproducer in the description (assessed individually — see the candidate notes appended below).
+Dropped (not in bugs.txt): ci-test-infra (34), internal-tooling (10), test-logic-only (4) and a few
+other non-DB-behavior items.
 
-### Conclusion on scope
-A genuine "reproduce all 100 in kind" is **not achievable**: the automatic pipeline is blocked by
-BUG-1/2/3, and even with unlimited hand-crafting effort the **large majority of these issues are
-not reproducible through a deployed cqlsh cluster** (they are CI/test, internal-logic,
-multi-node-repair, or trunk-only-without-an-image bugs). The realistic reproducible set is a
-**small handful**, led by CASSANDRA-20050.
+### Deployability gate (drives which bugs can be reproduced from a stock image)
+For a released `X.Y.Z` fix version, the **buggy version = that patch − 1**, and the official
+`cassandra:<buggy>` Docker image already contains the bug — so a single stock pod reproduces it with
+**no source build** (the same fast path proven on 20050). Image ceilings used: `3.11→19, 4.0→20,
+4.1→11, 5.0→8`.
 
----
+- **19 / 51** are *deployable* (buggy version ≤ image ceiling).
+- **32 / 51** are *trunk-only* (fixed only in `6.0-alpha*/6.0/7.x`; no released image) → would need a
+  custom trunk source build (and a matching base image that likely does not exist) → out of scope for
+  the stock-image path.
 
-## Part 3 — Reproductions achieved in the kind cluster
+## Part 3 — Reproductions achieved in the kind cluster (6)
 
-### CASSANDRA-20050 — UDT/vector clustering key in DESC order rejects valid INSERT
-- **Problem:** `sregym/conductor/problems/auto_cassandra_20050.py` (hand-crafted; buggy `4.0.14`,
-  `source_git_ref=cassandra-4.0.14`; fixed in 4.0.15 / 4.1.8 / 5.0.3).
-- **Reproducer (cqlsh):**
-  ```sql
-  CREATE KEYSPACE udt_ks WITH REPLICATION = {'class':'SimpleStrategy','replication_factor':1};
-  USE udt_ks;
-  CREATE TYPE point (x int, y int);
-  CREATE TABLE events (id int, loc frozen<point>, val text, PRIMARY KEY (id, loc))
-      WITH CLUSTERING ORDER BY (loc DESC);
-  INSERT INTO events (id, loc, val) VALUES (1, {x: 10, y: 20}, 'data');
-  ```
-- **Expected (buggy 4.0.14):** the INSERT is rejected with
-  `InvalidRequest … Invalid user type literal for loc of type frozen<point>`.
-  With `CLUSTERING ORDER BY (loc ASC)` the identical INSERT succeeds.
-- **Status:** ✅ **REPRODUCED in the kind cluster** (2026-06-11).
-  - Built buggy `4.0.14` from source (`cassandra-4.0.14` tag, `ant jar` in `eclipse-temurin:11`),
-    loaded into kind. Deployed a 3-node K8ssandra cluster; the deployed image
-    `docker.io/k8ssandra/cass-management-api:4.0.14-ubi` **is** the buggy 4.0.14 build, so the
-    running cluster exhibits the bug directly (no image swap needed — fix landed only in 4.0.15+).
-  - Ran the reproducer via `cqlsh` inside pod `sregym-cassandra-dc1-default-sts-0`
-    (`-c cassandra`, authenticated with the `sregym-cassandra-superuser` secret) against
-    `sregym-cassandra-dc1-service`:
+All reproductions deploy a stock single-node `cassandra:<buggy>` pod (heap capped at 1G so many run
+concurrently), drive the reproducer via `kubectl exec … cqlsh`/`nodetool`/`sstableloader`, and — where
+a fixed image exists — run the **identical** workload on the fixed version as an A/B control. The
+reusable deploy/wait/cql/teardown helper is in the session files dir (`repro_helper.sh`).
 
-    ```text
-    # DESC clustering order (buggy path):
-    <stdin>:12:InvalidRequest: Error from server: code=2200 [Invalid query]
-      message="Invalid user type literal for loc of type frozen<point>"
-    command terminated with exit code 2          # <-- non-zero => bug present (NotReady oracle)
+| # | Bug | Buggy → Fixed | Category | Trigger | Control |
+| - | --- | --- | --- | --- | --- |
+| 1 | CASSANDRA-20050 | 4.0.14 → 4.0.15 | cql-semantics | `frozen<UDT>` clustering key + `CLUSTERING ORDER BY (loc DESC)` rejects a valid INSERT | ASC same schema inserts OK |
+| 2 | CASSANDRA-21348 | 5.0.8 (config) | cql-semantics | `check_data_resurrection` startup_check enabled → `SELECT … system_views.settings` throws `ClassCastException` | stock 5.0.8 (no config) returns rows |
+| 3 | CASSANDRA-21065 | 5.0.6 → 5.0.7 | storage-engine | `nodetool garbagecollect` on UCS + `only_purge_repaired_tombstones` with ≥2 unrepaired sstables → `ConcurrentModificationException` | fixed 5.0.8 runs clean |
+| 4 | CASSANDRA-20972 | 5.0.5 → 5.0.6 | storage-engine | range tombstone + higher-ts row + `SELECT DISTINCT … token(id) > MIN` → server `IllegalStateException` | fixed 5.0.6 returns rows |
+| 5 | CASSANDRA-21057 | 4.1.10 → 4.1.11 | other-db-behavior | trip disk-usage guardrail FULL, then disable threshold → gossip `DISK_USAGE` stays `FULL` | fixed 4.1.11 → `NOT_AVAILABLE` |
+| 6 | CASSANDRA-21092 | 5.0.6 → 5.0.7 | distributed-multinode | `sstableloader` legacy 3.11 sstables with zero-copy → server `AssertionError: Filter should not be serialized in old format` | fixed 5.0.8 loads 500 rows clean |
 
-    # ASC control (identical schema, only ORDER BY direction changed):
-     id | loc            | val
-    ----+----------------+------
-      1 | {x: 10, y: 20} | data
-    (1 rows)                                       # exit code 0 => control passes
-    ```
-  - **Conclusion:** the failure is isolated to `CLUSTERING ORDER BY (loc DESC)` on a `frozen<UDT>`
-    clustering key, exactly matching the documented root cause (DESC wraps the column type in
-    `ReversedType`; the UDT-literal validation path in `UserTypes.java` casts the wrapped type
-    directly instead of calling `unwrap()`). The positive ASC control rules out a generic UDT
-    problem. **Bug genuinely reproduced in kind.**
+### 1 — CASSANDRA-20050 (UDT/`ReversedType` clustering, buggy 4.0.14)
+Hand-crafted problem `sregym/conductor/problems/auto_cassandra_20050.py`. `CLUSTERING ORDER BY (loc
+DESC)` on a `frozen<point>` clustering key rejects a valid INSERT with
+`InvalidRequest … Invalid user type literal for loc of type frozen<point>` (exit 2); the ASC control
+inserts and reads back the row (exit 0). Reproduced on a 3-node K8ssandra cluster whose deployed image
+is the buggy 4.0.14 build. (Full deploy log retained in Part 3-legacy notes below.)
 
-### Environment/tooling issues surfaced during the 20050 deploy (NOT fixed — noted only)
+### 2 — CASSANDRA-21348 (`system_views.settings` ClassCastException, 5.0.8)
+The 5.0 `system_views.settings` virtual table cannot render a non-`String` setting value. Enabling a
+startup check populates `startup_checks` (an enum-keyed map):
+```
+# pod command appends an active block to cassandra.yaml before start:
+startup_checks:
+  check_data_resurrection:
+    enabled: true
+```
+Then:
+```sql
+SELECT * FROM system_views.settings;            -- buggy: throws
+SELECT name FROM system_views.settings WHERE name='startup_checks';
+```
+**Buggy (5.0.8 + config):** `ClassCastException: …StartupChecks$StartupCheckType cannot be cast to
+java.lang.String`. **Control (stock 5.0.8, no config):** the same SELECT returns rows cleanly →
+isolates the fault to the enum-keyed setting, not the table itself.
+
+### 3 — CASSANDRA-21065 (`nodetool garbagecollect` CME, buggy 5.0.6)
+```sql
+CREATE TABLE k.t (pk int PRIMARY KEY, v text) WITH compaction =
+ {'class':'UnifiedCompactionStrategy','only_purge_repaired_tombstones':'true','scaling_parameters':'L10'};
+```
+`nodetool disableautocompaction k t`, then `INSERT`+`DELETE`+`nodetool flush` **≥2 times** to leave
+≥2 *unrepaired* sstables, then `nodetool garbagecollect k t`:
+```
+java.util.ConcurrentModificationException
+  at java.util.Collections$UnmodifiableCollection$1.next
+  at org.apache.cassandra.db.compaction.CompactionManager$6.filterSSTables(CompactionManager.java:691)
+  at …performGarbageCollection(CompactionManager.java:683)
+```
+Root cause: `filterSSTables` iterates `transaction.originals()` while calling `transaction.cancel()`
+on each unrepaired sstable — mutating the set under iteration. A single sstable does **not** trip it
+(the for-each ends before the next `next()`); ≥2 unrepaired sstables are required. **Control:** the
+identical workload on fixed **5.0.8** runs clean.
+
+### 4 — CASSANDRA-20972 (`SELECT DISTINCT` + range tombstone, buggy 5.0.5)
+Exact reproducer from the fix's `DistinctReadTest`:
+```sql
+CREATE TABLE k.tbl (id int, ck int, x int, PRIMARY KEY (id, ck));
+DELETE FROM k.tbl USING TIMESTAMP 100 WHERE id = 1 AND ck < 10;   -- range tombstone
+INSERT INTO k.tbl (id, ck, x) VALUES (1, 5, 7) USING TIMESTAMP 101; -- live row inside the RT, higher ts
+-- nodetool flush k tbl
+SELECT DISTINCT id FROM k.tbl WHERE token(id) > -9223372036854775808;
+```
+**Buggy 5.0.5:** `ReadFailure`; server log shows
+`IllegalStateException: The UnfilteredRowIterator … must be closed before calling hasNext() or next()
+again` at `SSTableScanner.java:241` — matching the report exactly. **Control:** identical steps on
+fixed **5.0.6** return the row. (Note: the buggy version is 5.0.5 = the 5.0.6 fix patch − 1; running
+on 5.0.6 by mistake is itself the control.)
+
+### 5 — CASSANDRA-21057 (disk-usage guardrail cannot be disabled, buggy 4.1.10)
+`DiskUsageMonitor` only measures Cassandra's *own* data-dir size, so the ratio is inflated with a tiny
+`max_disk_size`:
+```
+nodetool setguardrailsconfig data_disk_usage_max_disk_size 1MiB
+nodetool setguardrailsconfig data_disk_usage_percentage_threshold 2 1   # args are [fail, warn]
+# wait one 30s monitor tick → gossip DISK_USAGE = FULL
+nodetool setguardrailsconfig data_disk_usage_percentage_threshold null null   # disable
+```
+**Buggy 4.1.10:** `DISK_USAGE` stays **FULL** at 30s and 60s — the monitor's
+`if (!enabled) return;` short-circuits and never re-evaluates, exactly the documented root cause
+("node does not stop advertising FULL via gossip"). **Control fixed 4.1.11:** the same disable makes
+`DISK_USAGE` transition to **NOT_AVAILABLE** within one tick (the fix's `onDiskUsageGuardrailDisabled`).
+(On a single node the FULL state did not hard-reject local writes, but the stuck gossip state — the
+actual mechanism being fixed — reproduces cleanly.)
+
+### 6 — CASSANDRA-21092 (zero-copy streaming of legacy sstables, buggy 5.0.6)
+Generate 3.11.19 (`me-1-big-*`, old bloom-filter format) sstables, copy them into a 5.0.6 pod, and
+`sstableloader -d <node-ip> <ks>/<tbl>` with the default `stream_entire_sstables=true`:
+```
+java.lang.AssertionError: Filter should not be serialized in old format
+  at org.apache.cassandra.utils.BloomFilterSerializer.serialize(BloomFilterSerializer.java:52)
+  at org.apache.cassandra.utils.BloomFilter.serialize(BloomFilter.java:67)
+  at org.apache.cassandra.io.sstable.format.FilterComponent.save(FilterComponent.java:78)
+```
+wrapped in `CorruptSSTableException`; the stream **fails**. **Control fixed 5.0.8:** the identical
+sstables load successfully (500 rows, 0 AssertionErrors) because the fix auto-disables zero-copy for
+pre-4.0 bloom-filter sstables.
+
+## Part 4 — Bugs assessed but not reproduced (disposition)
+
+| Bug | Buggy ver | Disposition | Reason |
+| --- | --- | --- | --- |
+| CASSANDRA-20915 | 4.0.18 | not-reproducible | `CREATE KEYSPACE` is rejected earlier by client-side validation with the **correct** "48 characters" message; the buggy `222` constant lives only in the internal `KeyspaceMetadata.validateKeyspaceName` path (unit tests). |
+| CASSANDRA-20982 | 4.0.19 | not-reproducible | `ALTER … TYPE` is fully disabled in 4.0 ("Altering column types is no longer supported"); the buggy `isValueCompatibleWith` check is reachable only from unit tests. |
+| CASSANDRA-20917 | 5.0.5 | not-observable | Internal error-type refinement (throw RTE instead of FSError in `TOCComponent`); no distinct client-visible behavior. |
+| CASSANDRA-21389 | 4.0.20 | not-observable | Server-side snapshot-name hardening (validation); no client-visible misbehavior in normal use. |
+| CASSANDRA-21219 | 5.0.6 | blocked-hard | CVE-2026-27314 privilege escalation needs full mTLS setup (`MutualTlsAuthenticator` + client cert truststore/keystore + roles) before `ADD IDENTITY` authz can be tested. |
+| CASSANDRA-20871 | 4.0.19 | blocked-hard | Counter + repaired-data AIOOBE needs `repaired_data_tracking_*` on (yaml+restart), counter cells in **repaired** sstables (no second node to mark repaired), and an empty counter context. |
+| CASSANDRA-21332 | 5.0.8 | blocked-hard | Static-SAI + range-tombstone resurrection is an in-JVM multi-node dtest requiring per-node divergent data, `read_repair=NONE`, and the replica-filtering-protection path. |
+| CASSANDRA-21245 | 5.0.8 | blocked-risk | Compressed-table compaction uses **uncompressed** size in the disk-space check. Reproducing needs data-dir free space < the table's uncompressed size; the kind node fs is **shared** by all repro pods, so filling it risks crashing co-located pods. Reproducer is otherwise well-understood. |
+| CASSANDRA-20877 | 4.0.19 | blocked-hard | FINALIZED incremental-repair cleanup after range movement; needs ≥2 nodes, incremental repair, bootstrap/decommission, and cleanup-interval timing. |
+| CASSANDRA-21132 | 5.0.6 | blocked-hard | SAI index-status gossip startup deadlock; needs a homogeneous multi-node cluster with many SAI indexes to trip the gossip-encoding feature-gate race. |
+| CASSANDRA-21428 | 4.0.20 | blocked-hard | Nodes stuck DOWN after `ECHO_REQ` timeout; needs multi-node + a transient partition with precise echo-timeout/recovery timing. |
+| CASSANDRA-20976 | 5.0.5 | blocked-hard | BTI-sstable `AssertionError` on token-range query; description is only a mailing-list link with no concrete reproducer. |
+| CASSANDRA-21290 | 4.1.11 | blocked-hard | Atomic heartbeat-file write; bug needs a crash in the file create→write window (hardening), not deterministically reproducible. |
+| 32 trunk-only bugs | — | blocked-no-image | Fixed only in `6.0-alpha*/6.0/7.x`; no released `X.Y.Z` image. Would need a custom trunk source build (and a matching base image, likely absent). |
+
+> Two structurally-clean trunk-only CQL bugs (21046 silently-accepted DDL options; 21055
+> `UPDATE … SET col[0]=…` on a non-existent pk) would be the next hand-craft candidates **if** the
+> build path supported a deployable image from a trunk ref.
+
+### Legacy 20050 deploy notes (environment issues surfaced during that run)
 
 - **ENV-1 — Hardcoded `storageClassName: openebs-hostpath`.** The K8ssandra CR (and other PVCs)
   request `openebs-hostpath` (`sregym/service/db_build_spec.py:151,229,238`,
@@ -175,24 +247,62 @@ multi-node-repair, or trunk-only-without-an-image bugs). The realistic reproduci
 
 ---
 
-## Part 4 — Other CQL candidates assessed (and why they were not reproduced)
+## Part 5 — Fixes applied to the SREGym tooling
 
-Each `cql-semantics` issue with a released fix was individually assessed for single-node
-cqlsh-reproducibility. Result: **none** is a clean fit; CASSANDRA-20050 remains the only one.
+All five tooling/environment bugs documented above were fixed. Each fix is surgical and scoped to a
+single file (no cross-file conflicts), validated with `py_compile`, `ruff`, and targeted functional
+tests. No pre-existing, unrelated lint errors were touched.
 
-| Bug | Buggy ver | cqlsh-only? | Why not reproduced |
-| --- | --- | --- | --- |
-| CASSANDRA-20915 | 4.0.18 | YES | Error-message-only diff: buggy says max keyspace-name length `222`, fixed says `48`. Both **reject** the DDL, so an exit-code / wrong-result oracle can't tell them apart — only the error *text* differs. Weak/unreliable oracle. |
-| CASSANDRA-21348 | 5.0.8 | NO | `SELECT * FROM system_views.settings` throws only after a **non-default `cassandra.yaml`** (`startup_checks`) is set before start — not pure cqlsh on a fresh node. |
-| CASSANDRA-21219 | 5.0.6 | NO | Privilege-escalation via `ADD IDENTITY` requires `MutualTlsAuthenticator` + client-cert identity setup, not default single-node cqlsh. |
-| CASSANDRA-21057 | 4.1.10 | NO | Disk-usage guardrail: needs the disk filled past a threshold + `nodetool setguardrailsconfig`; gossip-state assertion, not cqlsh. |
-| CASSANDRA-20871 | 4.0.19 | NO | `ArrayIndexOutOfBoundsException` in repaired-data tracking for counters — needs repair + SSTable state. |
-| CASSANDRA-21332 | 5.0.8 | NO | SAI + range-tombstone resurrection requires 3 replicas with deliberately divergent writes (replica-filtering-protection path). |
-| CASSANDRA-21245 | 5.0.8 | NO | Compressed-table sizing during compaction — needs large data volume + compaction + disk-space conditions. |
-| CASSANDRA-21055 | trunk-only | MAYBE | Clean CQL shape (`UPDATE … SET col[0]=42 WHERE pk=0` on a non-existent pk) but fixed **only in 6.0-alpha1/6.0** → no deployable released image; behavior is thread/assertion-dependent. |
-| CASSANDRA-21046 | trunk-only | MAYBE | Clean CQL DDL (silently-accepted `security_label`/bogus options) but fixed **only in 6.0-alpha1** → no deployable released image. |
-| CASSANDRA-20877 | 4.0.19 | NO | FINALIZED repair-session cleanup after range movement — needs incremental repair + topology change + time-based cleanup. |
+### BUG-1 — Jira parser 7-tuple unpack  ·  `sregym/service/jira_issue_parser.py`
+`JiraIssueParser.resolve()` now unpacks all 7 values from `extract_reproducer_full()` (was 5) and
+forwards the two previously-dropped fields (`setup_preconditions`, `fault_injection_type`) into
+`ParsedIssue`, mirroring `github_issue_parser.py`. The reproducer-summary log was updated to match.
+→ The `ValueError: too many values to unpack` is gone.
 
-> Two structurally-clean CQL bugs (21055, 21046) are blocked purely by the "no released base image"
-> gate; if the K8ssandra path supported building a deployable image from a trunk ref they would be
-> the next candidates to hand-craft.
+### BUG-2 — Jira buggy-version resolution  ·  `sregym/service/jira_issue_parser.py`
+`_extract_version()` was rewritten with a proper fallback chain:
+1. **Affects Version/s** (`fields["versions"]`) — first concrete semver = buggy version.
+2. **Fix Version/s derivation** (`fields["fixVersions"]`) — keep only released `X.Y.Z` patches
+   (exclude `6.0`, `6.0-alpha1`, etc.), pick the **lowest**, and **decrement the patch** to get the
+   deployable buggy version (guarded against `X.Y.0`). E.g. fix `4.0.15` → buggy **`4.0.14`**.
+3. **Improved free-text scan** — prefer `vX.Y.Z`, then version-mentioning lines (mirrors GitHub).
+4. **LLM fallback** — `_llm_extract_version()` (used only when `ANTHROPIC_API_KEY` is set).
+5. Clear `ValueError` if all fail.
+→ Sweep over the 100 cached Jira issues: **51 now resolve with correct structured derivation**
+(20050→4.0.14, 20870→5.0.5, 20904→4.0.18). The 49 that still raise are overwhelmingly the
+trunk-only (`6.0-alpha`) bugs with **no deployable released version** — failing fast with a clear
+error is correct, and is a strict improvement over the old behaviour of silently returning a
+garbage version (e.g. a Python version or an error code).
+
+### BUG-3 — Reproducer extractor reads Jira markup  ·  `sregym/service/reproducer_extractor.py`
+The regex fallback now recognises Jira `{code}`, `{code:sql}`, `{code:language=sql}`, and
+`{noformat}` blocks (plus `hN.` reproduce-section headings), strips `cqlsh`/`psql` prompts, and drops
+error-output lines (`InvalidRequest`, `Error from server`, `code=…`, `message=…`). Untagged Jira
+blocks are accepted only when they look like executable SQL/CQL (`_SQL_KEYWORDS` ∧ not `_is_prose`).
+GitHub-markdown behaviour is unchanged (untagged ``` ``` fences are still excluded).
+→ For CASSANDRA-20050 the extractor now returns clean, runnable `CREATE TABLE … / INSERT …` CQL.
+
+### BUG-4 / ENV-2 — Cluster-ready timeout too tight  ·  `sregym/service/apps/generic_db_app.py`
+`_wait_for_cluster_ready()` default raised **600 → 1200s**, now overridable via
+`SREGYM_CLUSTER_READY_TIMEOUT`. Callers that pass an explicit `timeout=` (e.g. the etcd problems'
+`timeout=300`) are unaffected.
+→ A 3-node K8ssandra first boot on kind (~660s observed) no longer trips a spurious deploy timeout.
+
+### ENV-1 — `openebs-hostpath` StorageClass missing  ·  `sregym/conductor/problems/generic_custom_build.py`
+Root cause clarified: the Conductor *does* install OpenEBS (creating `openebs-hostpath`), but only
+when `config.deploy_openebs or problem.requires_openebs()`. `GenericCustomBuildProblem` did **not**
+override `requires_openebs()` (unlike the older `CassandraBugProblem`), so it relied entirely on the
+`deploy_openebs=True` default — and a run with `deploy_openebs=False` would leave PVCs Pending.
+Fix: `GenericCustomBuildProblem.requires_openebs()` now returns **True**, so OpenEBS/`openebs-hostpath`
+is always provisioned for these operator-managed problems regardless of the flag.
+(My earlier reproduction hit this only because the ad-hoc driver bypassed the Conductor's setup; the
+manual `openebs-hostpath` StorageClass alias was just a harness workaround, not a source change.)
+
+### End-to-end validation
+- `parse_issue("…/CASSANDRA-20050")` → `version=4.0.14`, `git_ref=cassandra-4.0.14`, clean reproducer
+  (exercises BUG-1 + BUG-2 + BUG-3 together; runs offline via the regex fallback).
+- `ProblemRegistry` still loads **144** problems; the hand-crafted `auto_cassandra_20050.py` is
+  unchanged and still present.
+- Extractor regression checks pass (GitHub `sql` fence works; untagged GitHub fence excluded; Jira
+  `{code:sql}` works). `py_compile` + `ruff check`/`ruff format` clean on all changed files; no new
+  lint errors introduced (verified against the `HEAD` baseline).

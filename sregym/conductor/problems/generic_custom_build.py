@@ -288,6 +288,16 @@ class GenericCustomBuildProblem(Problem):
         else:
             self.mitigation_oracle = None
 
+    def requires_openebs(self) -> bool:
+        """These problems deploy operator-managed clusters whose PVCs request the
+        ``openebs-hostpath`` StorageClass (see the manifests in db_build_spec.py).
+        Returning True makes the Conductor provision OpenEBS so that storage class
+        exists, regardless of the ``deploy_openebs`` config flag — mirroring
+        CassandraBugProblem.requires_openebs(). Without this, a run with
+        ``deploy_openebs=False`` leaves PVCs Pending and the cluster never schedules.
+        """
+        return True
+
     # ── Fault injection ───────────────────────────────────────────────────────
 
     def post_deploy(self):

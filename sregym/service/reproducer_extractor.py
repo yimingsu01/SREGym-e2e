@@ -55,34 +55,72 @@ def _extract_json(raw: str) -> dict | None:
     except json.JSONDecodeError:
         return None
 
+
 # ── Regex fallback (used when LLM is unavailable) ────────────────────────────
 
-# Matches both markdown heading (## To Reproduce) and bold (**To Reproduce:**) formats.
+# Matches markdown heading (## To Reproduce), Jira heading (h2. To Reproduce), and bold
+# (**To Reproduce:**) formats.
 _REPRO_SECTION_RE = re.compile(
     r"(?:^|\n)"
-    r"(?:#{1,4}\s*|\*{1,2})?"
+    r"(?:(?:#{1,4}\s*|h[1-6]\.\s*)|\*{1,2})?"
     r"(?:steps?\s+to\s+reproduc|to\s+reproduc|how\s+to\s+reproduc|reproduc)[^\n]*"
     r"(?:\*{1,2})?\s*:?\s*\n"
-    r"(.*?)(?=\n(?:#{1,4}\s|\*{1,2}\S)|\Z)",
+    r"(.*?)(?=\n(?:#{1,4}\s|h[1-6]\.\s|\*{1,2}\S)|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 _CODE_BLOCK_RE = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
+_JIRA_CODE_BLOCK_RE = re.compile(r"\{(code|noformat)(?::([^}]*))?\}\n?(.*?)\{\1\}", re.DOTALL | re.IGNORECASE)
+_JIRA_PROMPT_RE = re.compile(
+    r"^\s*(?:\w+@cqlsh(?::\w+)?>\s*|cqlsh(?::\w+)?>\s*|(?:mysql|postgres|=#|=>)\s*)",
+    re.IGNORECASE,
+)
+_JIRA_OUTPUT_RE = re.compile(
+    r"^\s*(?:InvalidRequest|Error(?:\s+from\s+server)?|Exception|Traceback|WARN|ERROR)\b|code=\d+|message=",
+    re.IGNORECASE,
+)
 # Untagged blocks ("") are excluded: they're commonly used for error output, not executable code.
 _EXEC_LANGS = {"sql", "mysql", "cql", "cqlsh", "bash", "sh", "shell", "python", "py", "go"}
+
+
+def _jira_language_hint(hint: str | None) -> str:
+    if not hint:
+        return ""
+    hint = hint.strip().lower()
+    m = re.search(r"(?:^|[,\s;|])language\s*=\s*([\w+-]+)", hint)
+    if m:
+        return m.group(1)
+    m = re.match(r"([\w+-]+)", hint)
+    return m.group(1) if m else ""
+
+
+def _clean_jira_code_block(content: str) -> str:
+    lines = []
+    for line in content.splitlines():
+        cleaned = _JIRA_PROMPT_RE.sub("", line).strip()
+        if not cleaned or _JIRA_OUTPUT_RE.search(cleaned):
+            continue
+        lines.append(cleaned)
+    return "\n".join(lines).strip()
 
 
 def _regex_extract(body: str) -> str | None:
     for section in _REPRO_SECTION_RE.finditer(body):
         blocks = [
-            m.group(2).strip()
-            for m in _CODE_BLOCK_RE.finditer(section.group(1))
-            if m.group(1).lower() in _EXEC_LANGS
+            m.group(2).strip() for m in _CODE_BLOCK_RE.finditer(section.group(1)) if m.group(1).lower() in _EXEC_LANGS
         ]
         if blocks:
             return "\n\n".join(blocks)
     for m in _CODE_BLOCK_RE.finditer(body):
         if m.group(1).lower() in _EXEC_LANGS:
             return m.group(2).strip()
+    blocks = []
+    for m in _JIRA_CODE_BLOCK_RE.finditer(body):
+        language = _jira_language_hint(m.group(2))
+        cleaned = _clean_jira_code_block(m.group(3))
+        if language in _EXEC_LANGS or (not language and _SQL_KEYWORDS.search(cleaned) and not _is_prose(cleaned)):
+            blocks.append(cleaned)
+    if blocks:
+        return "\n\n".join(blocks)
     return None
 
 
@@ -149,9 +187,7 @@ def _is_sentry_auto_filed(body: str) -> bool:
     return any(marker in low for marker in _SENTRY_MARKERS)
 
 
-def _sanity_check_reproducer(
-    reproducer: str, buggy_output: str | None
-) -> tuple[bool, str]:
+def _sanity_check_reproducer(reproducer: str, buggy_output: str | None) -> tuple[bool, str]:
     """Return (ok, reason). If ok is False, the reproducer should be discarded.
 
     Guards against four common extraction failure modes:
@@ -170,8 +206,7 @@ def _sanity_check_reproducer(
         # The length floor keeps single-word outputs (e.g. "ERROR") from triggering.
         if len(buggy_norm) > 30 and buggy_norm in repro_norm:
             return False, (
-                "reproducer contains buggy_output verbatim — "
-                "likely the crash traceback was extracted as the reproducer"
+                "reproducer contains buggy_output verbatim — likely the crash traceback was extracted as the reproducer"
             )
 
     for marker in _PANIC_MARKERS:
@@ -439,6 +474,7 @@ def _llm_extract(body: str) -> tuple[str | None, str | None, str | None, str | N
 
     try:
         import anthropic
+
         client = anthropic.Anthropic(api_key=api_key)
         # Note: sonnet-4-6 rejects assistant-message prefill at request time, so
         # we rely on the strict "OUTPUT FORMAT" instruction in the system prompt
@@ -458,9 +494,7 @@ def _llm_extract(body: str) -> tuple[str | None, str | None, str | None, str | N
         )
         data = _extract_json(raw)
         if data is None:
-            logger.warning(
-                f"[ReproducerExtractor] LLM returned unparseable response — skipping extraction"
-            )
+            logger.warning("[ReproducerExtractor] LLM returned unparseable response — skipping extraction")
             return None, None, None, None, None, False, None
         reproducer = data.get("reproducer") or None
         if reproducer and reproducer.strip().upper() == "NONE":
@@ -478,7 +512,15 @@ def _llm_extract(body: str) -> tuple[str | None, str | None, str | None, str | N
             fault_injection_type = None
         if not reproducer and not crash_on_startup:
             logger.warning(f"[ReproducerExtractor] LLM returned no reproducer. Raw: {raw[:300]}")
-        return reproducer, expected, buggy_output, correct_output, setup_preconditions, crash_on_startup, fault_injection_type
+        return (
+            reproducer,
+            expected,
+            buggy_output,
+            correct_output,
+            setup_preconditions,
+            crash_on_startup,
+            fault_injection_type,
+        )
     except Exception as e:
         logger.warning(f"[ReproducerExtractor] LLM extraction failed: {e}")
         return None, None, None, None, None, False, None
@@ -562,6 +604,7 @@ def repair_reproducer(
 
     try:
         import anthropic
+
         client = anthropic.Anthropic(api_key=api_key)
         # See _llm_extract: sonnet-4-6 rejects assistant-message prefill, so we
         # rely on the strict "OUTPUT FORMAT" instruction plus _extract_json.
@@ -570,13 +613,16 @@ def repair_reproducer(
             max_tokens=2048,
             system=_REPAIR_SYSTEM_PROMPT,
             messages=[
-                {"role": "user", "content": _REPAIR_USER_TEMPLATE.format(
-                    body=body[:6000],
-                    reproducer=reproducer,
-                    buggy_output=buggy_output or "(not extracted)",
-                    correct_output=correct_output or "(not extracted)",
-                    actual_output=actual_output[:2000],
-                )},
+                {
+                    "role": "user",
+                    "content": _REPAIR_USER_TEMPLATE.format(
+                        body=body[:6000],
+                        reproducer=reproducer,
+                        buggy_output=buggy_output or "(not extracted)",
+                        correct_output=correct_output or "(not extracted)",
+                        actual_output=actual_output[:2000],
+                    ),
+                },
             ],
         )
         raw = _response_text(message)
@@ -586,9 +632,7 @@ def repair_reproducer(
         )
         data = _extract_json(raw)
         if data is None:
-            logger.warning(
-                "[ReproducerExtractor] repair returned unparseable response — no repair applied"
-            )
+            logger.warning("[ReproducerExtractor] repair returned unparseable response — no repair applied")
             return None
         repaired = data.get("reproducer") or None
         if repaired and repaired.strip().upper() == "NONE":
@@ -608,6 +652,7 @@ def repair_reproducer(
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
 
 def extract_reproducer(body: str) -> tuple[str | None, str | None, bool]:
     """Return (reproducer, expected_output, crash_on_startup).
@@ -643,20 +688,24 @@ def extract_reproducer_full(
         )
         return None, None, None, None, None, False, None
 
-    reproducer, expected_output, buggy_output, correct_output, setup_preconditions, crash_on_startup, fault_injection_type = _llm_extract(body)
+    (
+        reproducer,
+        expected_output,
+        buggy_output,
+        correct_output,
+        setup_preconditions,
+        crash_on_startup,
+        fault_injection_type,
+    ) = _llm_extract(body)
     if not (reproducer or crash_on_startup):
         reproducer = _regex_extract(body)
         if reproducer:
-            logger.debug(
-                f"[ReproducerExtractor] Regex fallback found reproducer ({len(reproducer)} chars)"
-            )
+            logger.debug(f"[ReproducerExtractor] Regex fallback found reproducer ({len(reproducer)} chars)")
 
     if reproducer:
         ok, reason = _sanity_check_reproducer(reproducer, buggy_output)
         if not ok:
-            logger.warning(
-                f"[ReproducerExtractor] Discarding extracted reproducer — {reason}"
-            )
+            logger.warning(f"[ReproducerExtractor] Discarding extracted reproducer — {reason}")
             reproducer = None
 
     if reproducer or crash_on_startup or fault_injection_type:
@@ -666,4 +715,12 @@ def extract_reproducer_full(
             f"correct_output={correct_output!r} setup_preconditions={setup_preconditions!r} "
             f"crash_on_startup={crash_on_startup} fault_injection_type={fault_injection_type!r}"
         )
-    return reproducer, expected_output, buggy_output, correct_output, setup_preconditions, crash_on_startup, fault_injection_type
+    return (
+        reproducer,
+        expected_output,
+        buggy_output,
+        correct_output,
+        setup_preconditions,
+        crash_on_startup,
+        fault_injection_type,
+    )
