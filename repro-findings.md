@@ -99,12 +99,20 @@ For a released `X.Y.Z` fix version, the **buggy version = that patch − 1**, an
   custom trunk source build (and a matching base image that likely does not exist) → out of scope for
   the stock-image path.
 
-## Part 3 — Reproductions achieved in the kind cluster (6)
+## Part 3 — Reproductions achieved in the kind cluster (11)
 
-All reproductions deploy a stock single-node `cassandra:<buggy>` pod (heap capped at 1G so many run
-concurrently), drive the reproducer via `kubectl exec … cqlsh`/`nodetool`/`sstableloader`, and — where
-a fixed image exists — run the **identical** workload on the fixed version as an A/B control. The
-reusable deploy/wait/cql/teardown helper is in the session files dir (`repro_helper.sh`).
+Reproductions 1-6 deploy a stock single-node `cassandra:<buggy>` pod (heap capped at 1G so many run
+concurrently); reproductions 7-11 (Phase 3) add multi-node rings where the bug requires them. All drive
+the reproducer via `kubectl exec … cqlsh`/`nodetool`/`sstableloader`/`sstabledump`, and — where a fixed
+image exists — run the **identical** workload on the fixed version as an A/B control. The reusable
+single-node deploy/wait/cql/teardown helper is in the session files dir (`repro_helper.sh`); the
+multi-node StatefulSet recipe and the per-bug agent prompts are in `.claude/repro_workflow.js`. Per-bug
+raw evidence logs are saved under `.claude/repro-evidence/repro-CASSANDRA-<n>.md`.
+
+> Reproductions 7-11 were produced in a **record-only** Phase 3 run (no SREGym tooling or Cassandra
+> source modified). Every agent used manual/hand-crafted mode (kubectl + cqlsh against stock images) and
+> reported `tooling_findings: none`, so no new SREGym tooling bugs surfaced this session (the Part 1/5
+> Jira-parser path was never exercised).
 
 | # | Bug | Buggy → Fixed | Category | Trigger | Control |
 | - | --- | --- | --- | --- | --- |
@@ -114,6 +122,11 @@ reusable deploy/wait/cql/teardown helper is in the session files dir (`repro_hel
 | 4 | CASSANDRA-20972 | 5.0.5 → 5.0.6 | storage-engine | range tombstone + higher-ts row + `SELECT DISTINCT … token(id) > MIN` → server `IllegalStateException` | fixed 5.0.6 returns rows |
 | 5 | CASSANDRA-21057 | 4.1.10 → 4.1.11 | other-db-behavior | trip disk-usage guardrail FULL, then disable threshold → gossip `DISK_USAGE` stays `FULL` | fixed 4.1.11 → `NOT_AVAILABLE` |
 | 6 | CASSANDRA-21092 | 5.0.6 → 5.0.7 | distributed-multinode | `sstableloader` legacy 3.11 sstables with zero-copy → server `AssertionError: Filter should not be serialized in old format` | fixed 5.0.8 loads 500 rows clean |
+| 7 | CASSANDRA-21219 | 5.0.6 → 5.0.7 | cql-semantics (security) | non-superuser `bob` (CREATE-only) runs `ADD IDENTITY 'spiffe://repro/bob' TO ROLE cassandra` → silent success, binding row created (CVE-2026-27314) | fixed 5.0.7 rejects: `Unauthorized … Only superusers can bind identities to a role with superuser status` |
+| 8 | CASSANDRA-21290 | 4.1.11 (no fixed image) | other-db-behavior | with `check_data_resurrection` on, a 0-byte `cassandra-heartbeat` file at boot → `Failed to deserialize heartbeat file` → exit 3 | within-version: a *missing* file is tolerated (auto-created); only the *empty* file aborts startup |
+| 9 | CASSANDRA-21332 | 5.0.8 (no fixed image) | cql-semantics (SAI/RFP) | 3-node divergent data + SAI static col + `read_repair=NONE` → `SELECT … WHERE s1=42` at `CL=ALL` returns 3 rows (2 range-tombstoned rows resurrected) | within-version: full-partition read `WHERE pk0=1` returns the correct 1 row |
+| 10 | CASSANDRA-20877 | 4.0.19 → 4.0.20 | distributed-multinode | incremental repair finalizes, then range movement (scale 2→3) → FINALIZED `system.repairs` row survives a full re-repair on the coordinator | fixed 4.0.20 auto-deletes the equivalent session on the coordinator |
+| 11 | CASSANDRA-21132 | 5.0.6 (fix opt-in) | distributed-multinode | 324 SAI indexes + cold cluster restart → legacy `INDEX_STATUS` gossip (38655 B > Short.MAX_VALUE) → `AssertionError` in GossipStage, join deadlock | not run — fix is opt-in (`force_optimized_index_status_format`); a stock-5.0.7 A/B would still reproduce |
 
 ### 1 — CASSANDRA-20050 (UDT/`ReversedType` clustering, buggy 4.0.14)
 Hand-crafted problem `sregym/conductor/problems/auto_cassandra_20050.py`. `CLUSTERING ORDER BY (loc
@@ -202,6 +215,113 @@ wrapped in `CorruptSSTableException`; the stream **fails**. **Control fixed 5.0.
 sstables load successfully (500 rows, 0 AssertionErrors) because the fix auto-disables zero-copy for
 pre-4.0 bloom-filter sstables.
 
+### 7 — CASSANDRA-21219 (privilege escalation via `ADD IDENTITY`, buggy 5.0.6) — Phase 3
+CVE-2026-27314. **Prior verdict "blocked-hard, needs full mTLS PKI" is overturned with evidence:** the
+authorization gate on `ADD IDENTITY` (`AddIdentityStatement.authorize/execute`) has no
+authenticator-type dependency (only `ensureNotAnonymous`), so the bug is reachable under plain
+`PasswordAuthenticator` with **zero PKI**. Single node, `PasswordAuthenticator` + `CassandraAuthorizer`:
+```sql
+-- as superuser:
+CREATE ROLE bob WITH PASSWORD='bob' AND LOGIN=true AND SUPERUSER=false;
+GRANT CREATE ON ALL ROLES TO bob; GRANT CREATE ON ALL KEYSPACES TO bob;
+-- as bob (CREATE-only, NOT superuser):
+ADD IDENTITY 'spiffe://repro/bob' TO ROLE cassandra;     -- buggy: rc=0, silent success
+```
+**Buggy 5.0.6:** `SELECT identity,role FROM system_auth.identity_to_role` then shows
+`spiffe://repro/bob | cassandra` — a CREATE-only role bound its identity to the superuser role (the
+escalation). The buggy signature is this concrete wrong result (a silent-success op has no error line).
+**Control fixed 5.0.7** (identical workload): the same `ADD IDENTITY` is rejected with
+`Unauthorized: … code=2100 … "Only superusers can bind identities to a role with superuser status"`
+(exit 2), and `identity_to_role` stays empty. mTLS is only the downstream *use* of the bound identity to
+log in as the superuser — not the bug — so the PKI would add no proof. (`LIST IDENTITIES` is not valid
+5.0.x grammar; the binding is observed via `SELECT` on `system_auth.identity_to_role`.)
+
+### 8 — CASSANDRA-21290 (empty heartbeat file aborts startup, buggy 4.1.11) — Phase 3
+"Implement atomic heartbeat file write." The `check_data_resurrection` startup check writes a heartbeat
+file (`DEFAULT_HEARTBEAT_FILE=/var/lib/cassandra/data/cassandra-heartbeat`) non-atomically; a crash
+between create and write leaves a **0-byte** file, and the buggy read path
+(`Heartbeat.deserializeFromJsonFile`) cannot parse it and aborts startup. Single `cassandra:4.1.11` pod
+whose command (a) enables `check_data_resurrection` and (b) pre-creates a 0-byte heartbeat file before
+the entrypoint:
+```
+ERROR [main] 2026-06-11 21:38:09,150 CassandraDaemon.java:900 - Failed to deserialize heartbeat file /var/lib/cassandra/data/cassandra-heartbeat
+```
+→ pod `0/1 Error`, `exitCode=3`, CrashLoop. **Within-version control** (no 4.1.12 image): with the same
+config but the heartbeat file **absent**, the check tolerates it and auto-creates a valid file
+(`{"last_heartbeat":"…"}`), the node reaches `Ready 1/1` with `restartCount 0` — isolating the empty
+file as the sole trigger (a missing file is fine; the failure is a deserialize error). **Caveats:** the
+crash *race* that produces the empty file in the wild was not raced (the empty-file *artifact* was
+staged directly, which exercises the identical read path the fix's fallback addresses); and
+`check_data_resurrection` is **off by default** in 4.1.11, so only deployments that explicitly enable it
+are exposed.
+
+### 9 — CASSANDRA-21332 (SAI static-column read resurrects tombstoned data, buggy 5.0.8) — Phase 3
+**Prior verdict "likely in-JVM-dtest-only" is empirically disproven.** 3-node ring, RF=3
+(`NetworkTopologyStrategy dc1:3`), `cassandra:5.0.8`; table per the fix's dtest:
+```sql
+CREATE TABLE rfp21332.rt_static_sai (pk0 int, ck0 boolean, ck1 double, s1 int static, v0 boolean,
+  PRIMARY KEY (pk0,ck0,ck1)) WITH read_repair='NONE';
+CREATE CUSTOM INDEX ON rfp21332.rt_static_sai (s1) USING 'StorageAttachedIndex';
+```
+The dtest's per-replica `executeInternal` divergence was reproduced **on a real ring** via gossip
+isolation: for each round, `nodetool disablegossip` on the other two pods, confirm they show `DN`, write
+at `CONSISTENCY ONE` with explicit `USING TIMESTAMP`, `nodetool flush`, re-enable gossip. The three-way
+divergence (node1 has row `[true,4.0]`, node2 has a range tombstone + surviving `[true,5.0]` and
+`s1=42`, node3 has `[false,1.0]`) was **verified physically with `sstabledump`** on each node's local
+`Data.db` (a `CL=ONE` read routes to an arbitrary replica and is not a reliable per-node probe). Then,
+from the coordinator with `CONSISTENCY ALL`:
+```
+SELECT ck0, ck1 FROM rfp21332.rt_static_sai WHERE s1 = 42;   -- returns 3 rows: (False,1),(True,4),(True,5)
+```
+instead of the single correct row `(True,5.0)` — `(False,1)` and `(True,4)` are range-tombstoned rows
+resurrected during Replica Filtering Protection. **Within-version control** (no 5.0.9 image): the normal
+full-partition read `WHERE pk0=1` at `CL=ALL` returns the correct single row (reconciliation applies the
+tombstone), isolating the SAI+RFP path as the defect.
+
+### 10 — CASSANDRA-20877 (FINALIZED repair sessions survive range movement, buggy 4.0.19) — Phase 3
+3-node ring bootstrapped from 2 (RF=2). `LocalSessions` cleanup
+(`-Dcassandra.repair_delete_timeout_seconds=30 -Dcassandra.repair_cleanup_interval_seconds=20` to make
+it testable). Workload: incremental `nodetool repair` (S1 FINALIZES) → scale StatefulSet 2→3 (cass-2
+bootstraps, ranges move) → second incremental repair S2 on cass-0 → wait > delete-timeout. The proof is
+a **differential on the S2 coordinator (cass-0)**:
+```
+# buggy 4.0.19, cass-0 debug.log (every 20s, forever):
+DEBUG [OptionalTasks:1] LocalSessions.java:456 - Skipping delete of FINALIZED LocalSession ed5be870-… because it has not been superseded by a more recent session
+#   → final `SELECT parent_id,state FROM system.repairs` = 2 rows (S1 survives + S2)
+# control fixed 4.0.20, cass-0 debug.log:
+DEBUG … LocalSessions.java:487 - Auto deleting repair session LocalSession{sessionID=eedbf8c0-…, state=FINALIZED, …}
+#   → final system.repairs = 1 row (S2 only)
+```
+Same workload, opposite outcome on the coordinator. (The bare "Skipping delete" line is *not* alone
+unique — it also fires for the newest session and, even under the fix, on the non-coordinator cass-1
+whose still-owned ranges S2 does not fully re-cover; that is why the discriminator is the *coordinator*,
+where a moved range is the only thing that can leave S1 non-superseded.)
+
+### 11 — CASSANDRA-21132 (oversized legacy INDEX_STATUS gossip deadlocks join, buggy 5.0.6) — Phase 3
+2-node ring (`StatefulSet`, persistent `volumeClaimTemplates` so the schema survives a restart). Load
+**324 SAI indexes** (20 keyspaces × 5 tables × ~8 indexes, identifiers padded to the 48-char max), then
+a **cold** bring-down/up (`kubectl scale sts/cass --replicas=0` then `=2`). On rejoin, all nodes have
+lost peer `RELEASE_VERSION`, so `Gossiper.getMinVersion()` is unknown and gossip falls back to the
+pre-5.0.3 **uncompressed** INDEX_STATUS encoding; the 38655-byte payload exceeds `Short.MAX_VALUE`
+(32767) and trips:
+```
+ERROR [GossipStage:1] JVMStabilityInspector.java:70 - Exception in thread Thread[GossipStage:1,5,GossipStage]
+java.lang.RuntimeException: java.lang.AssertionError
+Caused by: java.lang.AssertionError: null
+    at org.apache.cassandra.db.TypeSizes.sizeof(TypeSizes.java:44)
+    at org.apache.cassandra.gms.VersionedValue$VersionedValueSerializer.serializedSize(VersionedValue.java:381)
+    at org.apache.cassandra.gms.GossipDigestAckSerializer.serializedSize(GossipDigestAck.java:96)
+    at org.apache.cassandra.gms.GossipDigestSynVerbHandler.doVerb(GossipDigestSynVerbHandler.java:110)
+```
+exact match to the Jira stack; it loops every ~5s and cass-1 is stuck `DN` (join deadlock). Format
+reversion confirmed by `nodetool gossipinfo`: pre-restart the value is compressed (numeric codes,
+17654 B); post-restart it is the legacy form (duplicated `keyspace.index` keys + literal
+`"BUILD_SUCCEEDED"`, 38655 B). **Control not run** (budget) and importantly the fix is **opt-in**
+(`force_optimized_index_status_format: true`, default false) and does not fix the underlying
+`getMinVersion` race, so a naive stock-5.0.7 A/B would *still* reproduce; a correct positive control must
+set that flag. A single rolling pod-bounce does **not** trip it (cached peer version keeps the format
+compressed) — the full cold restart is required.
+
 ## Part 4 — Bugs assessed but not reproduced (disposition)
 
 | Bug | Buggy ver | Disposition | Reason |
@@ -210,16 +330,16 @@ pre-4.0 bloom-filter sstables.
 | CASSANDRA-20982 | 4.0.19 | not-reproducible | `ALTER … TYPE` is fully disabled in 4.0 ("Altering column types is no longer supported"); the buggy `isValueCompatibleWith` check is reachable only from unit tests. |
 | CASSANDRA-20917 | 5.0.5 | not-observable | Internal error-type refinement (throw RTE instead of FSError in `TOCComponent`); no distinct client-visible behavior. |
 | CASSANDRA-21389 | 4.0.20 | not-observable | Server-side snapshot-name hardening (validation); no client-visible misbehavior in normal use. |
-| CASSANDRA-21219 | 5.0.6 | blocked-hard | CVE-2026-27314 privilege escalation needs full mTLS setup (`MutualTlsAuthenticator` + client cert truststore/keystore + roles) before `ADD IDENTITY` authz can be tested. |
-| CASSANDRA-20871 | 4.0.19 | blocked-hard | Counter + repaired-data AIOOBE needs `repaired_data_tracking_*` on (yaml+restart), counter cells in **repaired** sstables (no second node to mark repaired), and an empty counter context. |
-| CASSANDRA-21332 | 5.0.8 | blocked-hard | Static-SAI + range-tombstone resurrection is an in-JVM multi-node dtest requiring per-node divergent data, `read_repair=NONE`, and the replica-filtering-protection path. |
-| CASSANDRA-21245 | 5.0.8 | blocked-risk | Compressed-table compaction uses **uncompressed** size in the disk-space check. Reproducing needs data-dir free space < the table's uncompressed size; the kind node fs is **shared** by all repro pods, so filling it risks crashing co-located pods. Reproducer is otherwise well-understood. |
-| CASSANDRA-20877 | 4.0.19 | blocked-hard | FINALIZED incremental-repair cleanup after range movement; needs ≥2 nodes, incremental repair, bootstrap/decommission, and cleanup-interval timing. |
-| CASSANDRA-21132 | 5.0.6 | blocked-hard | SAI index-status gossip startup deadlock; needs a homogeneous multi-node cluster with many SAI indexes to trip the gossip-encoding feature-gate race. |
-| CASSANDRA-21428 | 4.0.20 | blocked-hard | Nodes stuck DOWN after `ECHO_REQ` timeout; needs multi-node + a transient partition with precise echo-timeout/recovery timing. |
-| CASSANDRA-20976 | 5.0.5 | blocked-hard | BTI-sstable `AssertionError` on token-range query; description is only a mailing-list link with no concrete reproducer. |
-| CASSANDRA-21290 | 4.1.11 | blocked-hard | Atomic heartbeat-file write; bug needs a crash in the file create→write window (hardening), not deterministically reproducible. |
-| 32 trunk-only bugs | — | blocked-no-image | Fixed only in `6.0-alpha*/6.0/7.x`; no released `X.Y.Z` image. Would need a custom trunk source build (and a matching base image, likely absent). |
+| CASSANDRA-21245 | 5.0.8 | confirmed-blocked | **Phase 3, premise refuted.** The disk-space check on a single small pod used the **compressed** size (213,951 B), not uncompressed — verified across `compact`/`garbagecollect`/`upgradesstables`/`scrub` (all rc=0, zero denials) and by reading `getExpectedCompactedFileSize` bytecode (sums `onDiskLength` = compressed). The uncompressed `… is needed` figure only appears under sustained concurrent-write load over a large multi-GiB STCS bucket (reporter: 1.1 TiB, 31 pending compactions), un-stageable on one small pod. |
+| CASSANDRA-20871 | 4.0.19 | confirmed-blocked | **Phase 3.** The length-0 counter context that crashes `CounterContext.headerLength` is produced only by an in-JVM dtest `executeInternal` (uncoordinated node-local counter write); cqlsh/nodetool route through the counter leader (read-modify-write) and always yield a non-empty global shard. Code path is reachable (not shadowed); the empty-context precondition is not manufacturable externally. |
+| CASSANDRA-21428 | 4.0.20 | confirmed-blocked | **Phase 3.** `ECHO_REQ` and gossip multiplex on the same internode TCP/7000 connection, so a connection-level partition drops both; the failure detector convicts the peer (phi 8, 1s interval) within the ~10s echo-timeout window and `silentlyMarkDead` clears the stale `inflightEcho` entry (the bug's escape hatch). The required state (ECHO failed **while** FD healthy) needs an asymmetric verb-level drop (in-JVM `IMessageFilters`), not connection-level partitioning. |
+| CASSANDRA-20976 | 5.0.5 | confirmed-blocked | **Phase 3.** No concrete reproducer — the Jira description is a single mailing-list URL (64-byte body, verified by reading `/tmp/jira_issues/CASSANDRA-20976.json`). The assigned agent additionally hit a cyber-safeguard API false-positive; the disposition stands on the merits. |
+| 32 trunk-only bugs | — | blocked-no-image | Fixed only in `6.0-alpha*/6.0/7.x`; no released `X.Y.Z` image (re-confirmed: no `cassandra:6.0`/`5.0.9`/`4.0.21`/`4.1.12`/`7.0` tags on Docker Hub; ceilings 3.11→19, 4.0→20, 4.1→11, 5.0→8 hold). Would need a custom trunk source build (and a matching base image, likely absent). |
+
+> **Phase 3 note (2026-06-11):** CASSANDRA-21219, 21290, 21332, 20877, and 21132 were previously in this
+> "not reproduced" table as `blocked-hard`/`blocked-risk`; the 4-node kind cluster and gossip-isolation
+> technique moved all five to **reproduced** (Part 3 #7-11). For 21219/21332/21290 the prior blocking
+> rationale was over-scoped — see the per-section notes in Part 3.
 
 > Two structurally-clean trunk-only CQL bugs (21046 silently-accepted DDL options; 21055
 > `UPDATE … SET col[0]=…` on a non-existent pk) would be the next hand-craft candidates **if** the

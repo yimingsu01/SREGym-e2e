@@ -1,65 +1,45 @@
-# Apache Cassandra bugs — DB-behavior subset for SREGym reproduction.
-# Filtered from the original 100: EXCLUDES CI/test-infra, test-only logic, and
-# internal tooling (nodetool/JMX/CCM/cassandra-stress/virtual-table internals).
-# Grouped by category; within each, deployable-on-a-released-image bugs are listed
-# first (buggy version in brackets), then trunk-only bugs (no released image yet).
-# Total DB-behavior bugs: 51.
+# Apache Cassandra bugs — SREGym reproduction candidate list.
+#
+# CURATION (2026-06-11): pruned to the bugs we actually REPRODUCED in a kind cluster, then extended
+# with a freshly-collected batch of candidates filtered for likely-reproducibility (see criteria below).
+# The 40 previously-listed bugs that were NOT reproduced (not-reproducible, not-observable,
+# confirmed-blocked, and trunk-only/no-image) were removed; their full dispositions and evidence remain
+# in repro-findings.md (Parts 3-4) and repro-progress.md.
+#
+# Reproducibility heuristics learned from the first pass (used to filter the new batch):
+#   - DEPLOYABLE: fixed in a released X.Y.Z patch whose buggy version (patch-1) has a public image
+#     (ceilings 3.11->19, 4.0->20, 4.1->11, 5.0->8). Trunk-only fixes (6.0-alpha/6.0/6.x/7.x) have no
+#     image and are excluded.
+#   - DB-BEHAVIOR: a client- or operator-visible defect; excludes CI/test-infra, test-only logic, and
+#     internal tooling (nodetool/JMX/CCM/cassandra-stress/virtual-table internals).
+#   - STAGEABLE: has a concrete reproducer drivable from cqlsh/nodetool (single-node, or a multi-node
+#     ring that can be staged in kind). Excludes in-JVM-dtest-only, precise timing/partition windows,
+#     crash-between-syscalls races, and issues whose body has no concrete reproducer.
 
-## CQL semantics (reproduce all) — 13 bugs (7 deployable)
-1. https://issues.apache.org/jira/browse/CASSANDRA-20050  # buggy 4.0.14
-2. https://issues.apache.org/jira/browse/CASSANDRA-20871  # buggy 4.0.19
-3. https://issues.apache.org/jira/browse/CASSANDRA-20915  # buggy 4.0.18
-4. https://issues.apache.org/jira/browse/CASSANDRA-20982  # buggy 4.0.19
-5. https://issues.apache.org/jira/browse/CASSANDRA-21219  # buggy 5.0.6
-6. https://issues.apache.org/jira/browse/CASSANDRA-21332  # buggy 5.0.8
-7. https://issues.apache.org/jira/browse/CASSANDRA-21348  # buggy 5.0.8
-8. https://issues.apache.org/jira/browse/CASSANDRA-21045  # trunk-only (no released image)
-9. https://issues.apache.org/jira/browse/CASSANDRA-21046  # trunk-only (no released image)
-10. https://issues.apache.org/jira/browse/CASSANDRA-21055  # trunk-only (no released image)
-11. https://issues.apache.org/jira/browse/CASSANDRA-21061  # trunk-only (no released image)
-12. https://issues.apache.org/jira/browse/CASSANDRA-21112  # trunk-only (no released image)
-13. https://issues.apache.org/jira/browse/CASSANDRA-21152  # trunk-only (no released image)
+## ===================================================================================================
+## REPRODUCED (11) — proven in kind; buggy version in brackets. Full write-ups: repro-findings.md Part 3.
+## ===================================================================================================
 
-## Storage engine (compaction/sstable/memtable/compression) — 9 bugs (5 deployable)
-14. https://issues.apache.org/jira/browse/CASSANDRA-20917  # buggy 5.0.5
-15. https://issues.apache.org/jira/browse/CASSANDRA-20972  # buggy 5.0.5
-16. https://issues.apache.org/jira/browse/CASSANDRA-20976  # buggy 5.0.5
-17. https://issues.apache.org/jira/browse/CASSANDRA-21065  # buggy 5.0.6
-18. https://issues.apache.org/jira/browse/CASSANDRA-21245  # buggy 5.0.8
-19. https://issues.apache.org/jira/browse/CASSANDRA-21047  # trunk-only (no released image)
-20. https://issues.apache.org/jira/browse/CASSANDRA-21188  # trunk-only (no released image)
-21. https://issues.apache.org/jira/browse/CASSANDRA-21255  # trunk-only (no released image)
-22. https://issues.apache.org/jira/browse/CASSANDRA-21260  # trunk-only (no released image)
+### CQL semantics — 4
+https://issues.apache.org/jira/browse/CASSANDRA-20050  # buggy 4.0.14 -> fixed 4.0.15; frozen<UDT> clustering key + CLUSTERING ORDER BY DESC rejects valid INSERT
+https://issues.apache.org/jira/browse/CASSANDRA-21219  # buggy 5.0.6 -> fixed 5.0.7; non-superuser ADD IDENTITY binds cert to superuser role (CVE-2026-27314); no mTLS needed
+https://issues.apache.org/jira/browse/CASSANDRA-21332  # buggy 5.0.8 (no fixed image); 3-node divergence + SAI static col + read_repair=NONE resurrects tombstoned rows
+https://issues.apache.org/jira/browse/CASSANDRA-21348  # buggy 5.0.8 (+config); check_data_resurrection on -> SELECT system_views.settings ClassCastException
 
-## Distributed / multi-node (gossip/streaming/repair/topology) — 23 bugs (4 deployable)
-23. https://issues.apache.org/jira/browse/CASSANDRA-20877  # buggy 4.0.19
-24. https://issues.apache.org/jira/browse/CASSANDRA-21092  # buggy 5.0.6
-25. https://issues.apache.org/jira/browse/CASSANDRA-21132  # buggy 5.0.6
-26. https://issues.apache.org/jira/browse/CASSANDRA-21428  # buggy 4.0.20
-27. https://issues.apache.org/jira/browse/CASSANDRA-20872  # trunk-only (no released image)
-28. https://issues.apache.org/jira/browse/CASSANDRA-20887  # trunk-only (no released image)
-29. https://issues.apache.org/jira/browse/CASSANDRA-20983  # trunk-only (no released image)
-30. https://issues.apache.org/jira/browse/CASSANDRA-21002  # trunk-only (no released image)
-31. https://issues.apache.org/jira/browse/CASSANDRA-21003  # trunk-only (no released image)
-32. https://issues.apache.org/jira/browse/CASSANDRA-21005  # trunk-only (no released image)
-33. https://issues.apache.org/jira/browse/CASSANDRA-21025  # trunk-only (no released image)
-34. https://issues.apache.org/jira/browse/CASSANDRA-21033  # trunk-only (no released image)
-35. https://issues.apache.org/jira/browse/CASSANDRA-21035  # trunk-only (no released image)
-36. https://issues.apache.org/jira/browse/CASSANDRA-21102  # trunk-only (no released image)
-37. https://issues.apache.org/jira/browse/CASSANDRA-21115  # trunk-only (no released image)
-38. https://issues.apache.org/jira/browse/CASSANDRA-21142  # trunk-only (no released image)
-39. https://issues.apache.org/jira/browse/CASSANDRA-21143  # trunk-only (no released image)
-40. https://issues.apache.org/jira/browse/CASSANDRA-21144  # trunk-only (no released image)
-41. https://issues.apache.org/jira/browse/CASSANDRA-21187  # trunk-only (no released image)
-42. https://issues.apache.org/jira/browse/CASSANDRA-21216  # trunk-only (no released image)
-43. https://issues.apache.org/jira/browse/CASSANDRA-21236  # trunk-only (no released image)
-44. https://issues.apache.org/jira/browse/CASSANDRA-21252  # trunk-only (no released image)
-45. https://issues.apache.org/jira/browse/CASSANDRA-21341  # trunk-only (no released image)
+### Storage engine — 2
+https://issues.apache.org/jira/browse/CASSANDRA-20972  # buggy 5.0.5 -> fixed 5.0.6; range tombstone + higher-ts row + SELECT DISTINCT token()>MIN -> IllegalStateException
+https://issues.apache.org/jira/browse/CASSANDRA-21065  # buggy 5.0.6 -> fixed 5.0.7; nodetool garbagecollect (UCS + only_purge_repaired_tombstones, >=2 unrepaired sstables) -> CME
 
-## Other runtime DB behavior (startup/config/guardrails) — 6 bugs (3 deployable)
-46. https://issues.apache.org/jira/browse/CASSANDRA-21057  # buggy 4.1.10
-47. https://issues.apache.org/jira/browse/CASSANDRA-21290  # buggy 4.1.11
-48. https://issues.apache.org/jira/browse/CASSANDRA-21389  # buggy 4.0.20
-49. https://issues.apache.org/jira/browse/CASSANDRA-20978  # trunk-only (no released image)
-50. https://issues.apache.org/jira/browse/CASSANDRA-21409  # trunk-only (no released image)
-51. https://issues.apache.org/jira/browse/CASSANDRA-21410  # trunk-only (no released image)
+### Distributed / multi-node — 3
+https://issues.apache.org/jira/browse/CASSANDRA-20877  # buggy 4.0.19 -> fixed 4.0.20; incr repair finalizes + range movement -> FINALIZED system.repairs row never cleaned on coordinator
+https://issues.apache.org/jira/browse/CASSANDRA-21092  # buggy 5.0.6 -> fixed 5.0.7; sstableloader 3.11 sstables w/ zero-copy -> AssertionError: Filter should not be serialized in old format
+https://issues.apache.org/jira/browse/CASSANDRA-21132  # buggy 5.0.6 (fix opt-in); 324 SAI indexes + cold restart -> legacy INDEX_STATUS gossip overflows Short.MAX_VALUE -> AssertionError, join deadlock
+
+### Other runtime DB behavior — 2
+https://issues.apache.org/jira/browse/CASSANDRA-21057  # buggy 4.1.10 -> fixed 4.1.11; trip disk-usage guardrail FULL, disable threshold -> gossip DISK_USAGE stuck FULL
+https://issues.apache.org/jira/browse/CASSANDRA-21290  # buggy 4.1.11 (no fixed image); 0-byte cassandra-heartbeat file -> Failed to deserialize heartbeat file -> startup aborts
+
+## ===================================================================================================
+## NEW CANDIDATES (target 100) — collected 2026-06-11 from Apache Jira, filtered per the heuristics above.
+## (populated below)
+## ===================================================================================================
