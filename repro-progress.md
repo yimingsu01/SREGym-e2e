@@ -138,3 +138,21 @@ fixed image → within-version evidence.
 - **21290** was prior-labeled "likely non-deterministic". The non-deterministic part is the crash race;
   the *manifestation the fix addresses* (failing to parse an empty heartbeat file at startup) is
   deterministic and was staged directly.
+
+## Candidate-batch reproduction (2026-06-12) — COMPLETE (disk/time-bounded)
+
+Reproduced the **100 new `bugs.txt` candidates** via `.claude/repro_candidates_workflow.js` (record-only).
+**87/98 attempted** (2 already implemented). Full table: `repro-findings.md` Part 6.
+
+**Outcome:** reproduced **74** (66 verbatim-verified + 8 `*`-hedged),
+not-reproducible 6, confirmed-blocked 3, needs-fix-test 2,
+inconclusive 2 (14113 cyber-safeguard, 19166 truncated log). All 69 single-node attempted (57 reproduced);
+20/31 rings attempted (18 reproduced, ~90%).
+
+**Verified floor across both sessions: 66 (Part 6 verbatim) + 11 (Part 3) = 77 distinct Cassandra bugs
+reproduced in kind**, up to 8 more `*`-hedged.
+
+**Deferred (resumable):** 11 slow medium-confidence rings + 12-item
+needs-fix-test appendix — a **time + 63 GiB-disk wall**, not a correctness wall. The workflow is idempotent (skips
+candidates with a `/tmp/repro-<key>.md` log); resume by writing `/tmp/repro_batch.json` and re-running it. A larger
+disk / external cluster would allow higher ring concurrency.

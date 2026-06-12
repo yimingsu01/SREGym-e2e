@@ -426,3 +426,116 @@ manual `openebs-hostpath` StorageClass alias was just a harness workaround, not 
 - Extractor regression checks pass (GitHub `sql` fence works; untagged GitHub fence excluded; Jira
   `{code:sql}` works). `py_compile` + `ruff check`/`ruff format` clean on all changed files; no new
   lint errors introduced (verified against the `HEAD` baseline).
+
+## Part 6 — New-candidate batch reproduction (2026-06-12)
+
+Reproducing the 100 freshly-collected `bugs.txt` candidates via the resumable fan-out workflow `.claude/repro_candidates_workflow.js` (record-only). **87 of 98 reproducible candidates attempted** (2 already implemented as repo problems: 20108, 18105). All 69 single-node attempted; 20 of 31 rings attempted; **11 rings + 12 needs-fix-test appendix deferred** (disk+time wall, resumable — see end). Evidence: `.claude/repro-evidence/repro-CASSANDRA-<n>.md`, `candidate_results.json`.
+
+**Outcome (87 attempted):** **confirmed-blocked** 3, **inconclusive** 2, **needs-fix-test** 2, **not-reproducible** 6, **reproduced** 74.
+
+**Verified floor:** 66 of the 74 reproduced have their verbatim buggy signature confirmed present in the evidence log by an automated grep; the other 8 (marked `*`) are genuine reproductions whose `verbatim_signature` field paraphrased the log or were recovered from the log after a workflow-return crash (18647/16868 hand-confirmed). Combined with Part 3, the solidly-verified floor is **66 + 11 = 77** distinct Cassandra bugs reproduced in kind.
+
+Method: stock `cassandra:<buggy>` pod (single) or kind StatefulSet ring (multi-node, gossip-isolation for per-replica divergence), reproducer via cqlsh/nodetool, A/B control on buggy-patch+1 where ≤ released ceiling. Record-only (no SREGym/Cassandra source changed).
+
+**Infra:** the 63 GiB host disk could not sustain many concurrent Cassandra pods; the run used a bounded worker-pool (conc 3–8) with teardown + `crictl rmi --prune` between waves, and the first-session version pods + 20050 K8ssandra cluster were torn down to reclaim space (those reproductions remain in Part 3). The 11 deferred rings are the slowest medium-confidence multi-node bugs (a time+disk wall, not a correctness wall; ring reproduce rate was ~90%).
+
+`*` = verbatim_signature field paraphrased the log, or verdict recovered from log post-crash. `14113` and `19166` are `inconclusive`: 14113 tripped the Claude cyber-safeguard false-positive (needs manual, like 20976); 19166's log has full root-cause + reproducer but the run output was truncated by the crash (needs re-run).
+
+| Bug | Disposition | Buggy→Fix | Verbatim signature / reason |
+| --- | --- | --- | --- |
+| CASSANDRA-10968 | reproduced | 3.11.6→3.11.7 | {"files":["md-2-big-Data.db","md-1-big-Data.db","md-3-big-Data.db"]} |
+| CASSANDRA-12525 | reproduced | 4.1.0→4.1.1 | Connection error: ('Unable to connect to any servers', {'127.0.0.1:9042': AuthenticationFailed(… |
+| CASSANDRA-12949 | reproduced | 3.11.10→3.11.11 | {'chunk_length_in_kb': '128', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'} |
+| CASSANDRA-13874 | reproduced | 4.0.0→4.0.1 | Row Cache              : entries 0, size 0 bytes, capacity 0 bytes, 0 hits, 0 requests, NaN rec… |
+| CASSANDRA-13935 | reproduced | 3.11.8→3.11.9 | CREATE INDEX table1_last_update_date_idx ON repro13935.table1 (last_update_date); |
+| CASSANDRA-14013 | reproduced | 4.1.0→4.1.1 | count -------      0  (1 rows)  Warnings : Aggregation query used without partition key |
+| CASSANDRA-14204 | reproduced | 4.1.1→4.1.2 | java.lang.AssertionError 	at org.apache.cassandra.db.compaction.CompactionManager.parallelAllSS… |
+| CASSANDRA-14349 | reproduced | 3.11.9→3.11.10 | CommitLog-6-1781241743009.log  linkcount=1  ORPHAN(absent-from-commitlog) |
+| CASSANDRA-14463 | reproduced | 4.0.0→4.0.1 | INFO  [main] 2026-06-12 08:11:25,759 StorageService.java:528 - Gathering node replacement infor… |
+| CASSANDRA-14477 | reproduced | 3.11.8→3.11.9 | Exception (org.apache.cassandra.exceptions.ConfigurationException) encountered during startup: … |
+| CASSANDRA-14496 | reproduced | 4.0.0→4.0.1 | DEBUG [MigrationStage:1] 2026-06-12 04:24:44,927 TimeWindowCompactionStrategy.java:65 - Disabli… |
+| CASSANDRA-14559 | reproduced | 3.11.7→3.11.8 | INFO  [GossipTasks:1] 2026-06-12 08:17:07,912 Gossiper.java:880 - FatClient /10.244.1.141 has b… |
+| CASSANDRA-14925 | reproduced | 3.11.9→3.11.10 | java.lang.OutOfMemoryError: Java heap space 	at java.math.BigDecimal.toPlainString(BigDecimal.j… |
+| CASSANDRA-15134* | reproduced | 4.0.1→4.0.2 | LIVE dir t-01a043b0661611f1ae9669dc20ef3eb2 contains nb-1-big-SI_t_name_sasi.db and nb-2-big-SI… |
+| CASSANDRA-15135 | reproduced | 4.0.0→4.0.1 | Exception (java.lang.RuntimeException) encountered during startup: java.lang.reflect.Invocation… |
+| CASSANDRA-15191* | reproduced | 3.11.7→3.11.8 |  |
+| CASSANDRA-15433 | reproduced | 4.0.1→4.0.2 | Local write count: 0 |
+| CASSANDRA-15459 | reproduced | 3.11.7→3.11.8 | pk / c ----+---   0 / 0  (1 rows) |
+| CASSANDRA-15814 | reproduced | 3.11.7→3.11.8 | InvalidRequest: Error from server: code=2200 [Invalid query] message="Invalid list literal for … |
+| CASSANDRA-15857 | reproduced | 3.11.7→3.11.8 | org.apache.cassandra.exceptions.InvalidRequestException: Non-frozen tuples are not allowed insi… |
+| CASSANDRA-15896 | reproduced | 3.11.7→3.11.8 | java.lang.NullPointerException: null at org.apache.cassandra.db.marshal.AbstractType.toJSONStri… |
+| CASSANDRA-16071 | reproduced | 3.11.7→3.11.8 | ERROR [SASI-General:9] 2026-06-12 05:52:24,045 PerSSTableIndexWriter.java:262 - Failed to build… |
+| CASSANDRA-16146 | reproduced | 3.11.9→3.11.10 | STATUS:87:NORMAL,-1077568207160367180 |
+| CASSANDRA-16156 | reproduced | 3.11.8→3.11.9 | DEBUG [MessagingService-Outgoing-/10.244.2.125-Gossip] 2026-06-12 08:46:00,222 OutboundTcpConne… |
+| CASSANDRA-16259 | reproduced | 3.11.9→3.11.10 | java.lang.ArrayIndexOutOfBoundsException: 115 	at org.apache.cassandra.metrics.TableMetrics.com… |
+| CASSANDRA-16307 | reproduced | 3.11.10→3.11.11 | Consistency level set to ALL. Page size: 1   pk / ck ----+----   0 /  0  (1 rows)  Warnings : A… |
+| CASSANDRA-16334 | reproduced | 4.0.1→4.0.2 | WriteTimeout: Error from server: code=1100 [Coordinator node timed out waiting for replica node… |
+| CASSANDRA-16372 | reproduced | 3.11.9→3.11.10 | <stdin>:8:Failed to import 1 rows: ParseError - Failed to parse ['But if you now try to wash yo… |
+| CASSANDRA-16418* | reproduced | 4.1.0→4.1.1 | BUGGY 4.1.0: cqlsh "CONSISTENCY ONE; SELECT COUNT(*) FROM repro16418.t;" returned `count 3375` … |
+| CASSANDRA-16577 | reproduced | 3.11.10→3.11.11 | WARN  [main] 2026-06-12 07:14:20,771 StorageService.java:941 - There are nodes in the cluster w… |
+| CASSANDRA-16671 | reproduced | 3.11.10→3.11.11 | pk / ck / v ----+----+---   (0 rows) |
+| CASSANDRA-16692 | reproduced | 3.11.10→3.11.11 | java.lang.RuntimeException: Didn't receive schemas for all known versions within the timeout 	a… |
+| CASSANDRA-16718 | reproduced | 4.1.1→4.1.2 | java.lang.RuntimeException: Unable to gossip with any peers 	at org.apache.cassandra.gms.Gossip… |
+| CASSANDRA-16796 | reproduced | 4.0.0→4.0.1 | <stdin>:1:NoHostAvailable: ('Unable to complete the operation against any hosts', {<Host: 127.0… |
+| CASSANDRA-16836 | reproduced | 3.11.11→3.11.12 | org.apache.cassandra.exceptions.InvalidRequestException: Unknown function repro16836.double cal… |
+| CASSANDRA-16839 | reproduced | 4.0.1→4.0.2 | truncated-1781238400142-size_estimates  system        size_estimates     0 bytes   13 bytes |
+| CASSANDRA-16868 | reproduced | 4.0.0→4.0.1 | SELECT * FROM repro16868.t WHERE ck=2;  ->  (0 rows)   [SAME row returns (1,2,3) via PK lookup … |
+| CASSANDRA-16898 | reproduced | 4.0.1→4.0.2 | DESCRIBE MATERIALIZED VIEW repro16898ks.mv on 4.0.1 prints: WITH CLUSTERING ORDER BY (v ASC, ck… |
+| CASSANDRA-16902 | reproduced | 4.0.1→4.0.2 | <stdin>:1:Unauthorized: Error from server: code=2100 [Unauthorized] message="You are not author… |
+| CASSANDRA-16977 | reproduced | 4.0.1→4.0.2 | java.lang.ArrayIndexOutOfBoundsException: Index 1 out of bounds for length 1 	at org.apache.cas… |
+| CASSANDRA-17136 | reproduced | 4.0.1→4.0.2 | ERROR [RMI TCP Connection(8)-127.0.0.1] 2026-06-12 03:00:11,492 DefaultFSErrorHandler.java:64 -… |
+| CASSANDRA-17266 | reproduced | 4.0.3→4.0.4 | AND default_time_to_live = 0 |
+| CASSANDRA-17415 | reproduced | 3.11.12→3.11.13 | /var/lib/cassandra/data/repro17415_ks/mv-e1917d60661911f1a8c4edaf56a013df/snapshots/17812397388… |
+| CASSANDRA-17467 | reproduced | 4.0.3→4.0.4 | InvalidRequest: Error from server: code=2200 [Invalid query] message="Unable to parse a date/ti… |
+| CASSANDRA-17623 | reproduced | 4.0.4→4.0.5 | c['a'] = None |
+| CASSANDRA-17752* | reproduced | 4.0.5→4.0.6 |  |
+| CASSANDRA-17840 | reproduced | 4.0.5→4.0.6 | java.lang.IndexOutOfBoundsException: -2147483644 |
+| CASSANDRA-17913 | reproduced | 4.1.1→4.1.2 | InvalidRequest: Error from server: code=2200 [Invalid query] message="Invalid element selection… |
+| CASSANDRA-17918* | reproduced | 4.1.1→4.1.2 | DESCRIBE TYPE on 4.1.1 emits "    token text," (unquoted reserved keyword); fixed 4.1.2 emits "… |
+| CASSANDRA-17919 | reproduced | 4.1.1→4.1.2 | SyntaxException: line 1:13 no viable alternative at input 'P' (CREATE TABLE [P]...) |
+| CASSANDRA-17933 | reproduced | 4.0.6→4.0.7 | Caused by: java.nio.channels.OverlappingFileLockException: null 	at java.base/sun.nio.ch.FileLo… |
+| CASSANDRA-18264 | reproduced | 4.1.0→4.1.1 | java.nio.file.FileAlreadyExistsException: /tmp/lib/cassandra-0.jar	at java.base/java.nio.file.F… |
+| CASSANDRA-18647* | reproduced | 4.1.2→4.1.3 | cast(e as decimal) = 5.199999809265137 |
+| CASSANDRA-18760 | reproduced | 4.0.11→4.0.12 | java.lang.AssertionError: col1 	at org.apache.cassandra.db.rows.UnfilteredSerializer.lambda$ser… |
+| CASSANDRA-18778 | reproduced | 4.1.3→4.1.4 | Caused by: java.lang.IllegalArgumentException: 'keystore_password' must be specified 	at org.ap… |
+| CASSANDRA-18935 | reproduced | 4.1.3→4.1.4 | <stdin>:1:NoHostAvailable: ('Unable to complete the operation against any hosts', {<Host: 127.0… |
+| CASSANDRA-19401 | reproduced | 4.1.4→4.1.5 | INFO  [RMI TCP Connection(6)-127.0.0.1] 2026-06-12 03:00:08,251 SSTableImporter.java:173 - No n… |
+| CASSANDRA-19475 | reproduced | 4.1.4→4.1.5 | data_file_directories / [Ljava.lang.String;@4cb1c088 |
+| CASSANDRA-19566 | reproduced | 4.1.4→4.1.5 | -13767019200000 / 1533-09-28 12:00:00.000000+0000 / "1533-09-18 12:00:00.000Z" |
+| CASSANDRA-19637* | reproduced | 4.1.5→4.1.6 | 4.1.5 non-frozen list, same column: `UPDATE ... IF l >= null` -> InvalidRequest code=2200 messa… |
+| CASSANDRA-19747 | reproduced | 4.1.5→4.1.6 | field1 text PRIMARY KEY,     field2 text     field3 text |
+| CASSANDRA-19749 | reproduced | 4.1.5→4.1.6 | repro19749_missing /      null /         True /      null /        null |
+| CASSANDRA-19880 | reproduced | 5.0.0→5.0.1 | at org.apache.cassandra.transport.messages.ExecuteMessage.traceQuery(ExecuteMessage.java:227) -… |
+| CASSANDRA-19889 | reproduced | 5.0.1→5.0.2 | <stdin>:1:InvalidRequest: Error from server: code=2200 [Invalid query] message="full() indexes … |
+| CASSANDRA-19891 | reproduced | 5.0.4→5.0.5 | Caused by: java.lang.IllegalArgumentException: Unsupported collection type: map 	at org.apache.… |
+| CASSANDRA-20036 | reproduced | 5.0.2→5.0.3 | schema.cql:26:InvalidRequest: Error from server: code=2200 [Invalid query] message="Unknown typ… |
+| CASSANDRA-20052 | reproduced | 5.0.2→5.0.3 | ERROR [epollEventLoopGroup-5-14] 2026-06-12 03:32:11,922 JVMStabilityInspector.java:186 - Force… |
+| CASSANDRA-20086 | reproduced | 5.0.6→5.0.7 | SELECT pk FROM t ORDER BY val ann of [1.0, 2.0] LIMIT 1 -> pk=0 on 5.0.6 (WRONG; correct=pk=1 s… |
+| CASSANDRA-20171 | reproduced | 5.0.4→5.0.5 | InvalidRequest: Error from server: code=2200 [Invalid query] message="Resource <keyspace system… |
+| CASSANDRA-20189* | reproduced | 5.0.3→5.0.4 | SAI intersection query "CONSISTENCY ALL; SELECT * FROM repro20189.partial_updates WHERE a = 1 A… |
+| CASSANDRA-20238 | reproduced | 5.0.3→5.0.4 | Buggy SAI result `(0 rows)` from `SELECT * FROM repro20238_ks.tbl WHERE v0=1 AND pk0=0 ALLOW FI… |
+| CASSANDRA-20313 | reproduced | 5.0.3→5.0.4 | Caused by: java.lang.NullPointerException: Cannot invoke "org.apache.cassandra.utils.bytecompar… |
+| CASSANDRA-20449 | reproduced | 5.0.3→5.0.4 | 0 / 0 / {1, 2} / {1, 2} / {1, 2} |
+| CASSANDRA-20787 | reproduced | 5.0.4→5.0.5 | java.lang.RuntimeException: Cannot get data directories grouped by file store |
+| CASSANDRA-12734 | not-reproducible | 4.0.1 | Root cause of non-reproduction: the fix commit 67eb22ec9d588c9f984d13c0ffd703a14181f775 patches… |
+| CASSANDRA-16127 | not-reproducible | 3.11.8 | The literal reporter reproducer (disable->enable) does not reproduce on the released cassandra:… |
+| CASSANDRA-17848 | not-reproducible | 4.1.0 | The candidate's premise is wrong: 4.1.0 is the FIRST FIXED release on the 4.1 line, not a buggy… |
+| CASSANDRA-18118 | not-reproducible | 4.1.0 | Both of the body's documented reproducers were exercised; neither yielded a buggy-vs-fixed delt… |
+| CASSANDRA-18294 | not-reproducible | 4.1.0 | The code defect is REAL but shadowed at runtime. There is a genuine secondary truth of needs-fi… |
+| CASSANDRA-18824 | not-reproducible | 4.1.3 | Load-bearing chain: the 16418 guard does not merely EXIST in 4.1.3 — it FIRES in this exact rep… |
+| CASSANDRA-15669 | confirmed-blocked | 3.11.10 | harvested from /tmp log |
+| CASSANDRA-15970 | confirmed-blocked | 3.11.7 | harvested from /tmp log |
+| CASSANDRA-18756 | confirmed-blocked | 4.1.3 | Symptom is delayed RELEASE/deletion of references to obsolete SSTables, only while one long com… |
+| CASSANDRA-15164 | needs-fix-test | 3.11.8 | Went further than typical for needs-fix-test: adapted AND ran the fix-style serialize->deserial… |
+| CASSANDRA-17342 | needs-fix-test | 4.0.2 | Disposition needs-fix-test: the reporter explicitly states the bug is "demonstrated in the atta… |
+| CASSANDRA-14113 | inconclusive | 3.11.13 | NEEDS MANUAL ASSESSMENT (cyber-safeguard blocked the agent, like 20976). |
+| CASSANDRA-19166 | inconclusive | 4.1.3 | Log has full root-cause analysis + reproducer plan (nested UnmodifiableMap -> StackOverflowErro… |
+
+### Deferred (not attempted) — resumable
+
+**11 multi-node rings** (slowest medium-confidence; time+disk-bound): 15899, 15902, 15924, 16518, 16945, 17367, 17411, 17507, 18304, 18466, 20243.
+
+**12 needs-fix-test appendix** (reproducer only in the fix's unit/dtest): 15158, 15897, 15962, 16226, 17072, 17900, 18359, 19578, 20567, 20670, 20753, 20829.
+
+Resume: the workflow skips any candidate with a `/tmp/repro-<key>.md` log. Write `/tmp/repro_batch.json` (`{mode,ringConcurrency,candidates:[{key,buggy,topo,conf,trigger}]}`) and re-run `Workflow({scriptPath:'.claude/repro_candidates_workflow.js'})`. A larger disk/external cluster unblocks higher ring concurrency.
+
