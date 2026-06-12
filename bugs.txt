@@ -40,6 +40,132 @@ https://issues.apache.org/jira/browse/CASSANDRA-21057  # buggy 4.1.10 -> fixed 4
 https://issues.apache.org/jira/browse/CASSANDRA-21290  # buggy 4.1.11 (no fixed image); 0-byte cassandra-heartbeat file -> Failed to deserialize heartbeat file -> startup aborts
 
 ## ===================================================================================================
-## NEW CANDIDATES (target 100) — collected 2026-06-11 from Apache Jira, filtered per the heuristics above.
-## (populated below)
+## NEW CANDIDATES (100) — collected 2026-06-11 from Apache Jira, filtered per the heuristics above.
+## Each is a deployable (released-image) DB-behavior bug with an observable symptom and a stageable,
+## in-body or derivable reproducer. Tag legend: [1node|ring, H|M] = single-node or needs-a-ring;
+## H=high / M=medium classifier confidence. UNVERIFIED candidates (text-triaged, not yet reproduced).
+## ~25 per category, high-confidence first. Source verdicts: .claude/repro-evidence/classify_verdicts.json
 ## ===================================================================================================
+
+### CQL semantics — 25 (25 high, 0 medium)
+https://issues.apache.org/jira/browse/CASSANDRA-15814  # buggy 3.11.7; [1node,H] CREATE TABLE with frozen<list> clustering column WITH CLUSTERING ORDER BY (version DESC) + INSERT list literal -> Invalid list literal error
+https://issues.apache.org/jira/browse/CASSANDRA-15896  # buggy 3.11.7; [1node,H] INSERT ... JSON with empty-string "" for a uuid field, then SELECT JSON of that column -> server NullPointerException
+https://issues.apache.org/jira/browse/CASSANDRA-16307  # buggy 3.11.10; [ring,H] per-replica row deletes on different partitions + SELECT * GROUP BY pk with paging size 1 at CL=ALL -> wrongly returns a deleted row
+https://issues.apache.org/jira/browse/CASSANDRA-16671  # buggy 3.11.10; [ring,H] UPDATE covering all columns on node1 + column DELETE on node2 + SELECT at ALL -> expected row not returned
+https://issues.apache.org/jira/browse/CASSANDRA-16836  # buggy 3.11.11; [1node,H] MV with quoted UDF in WHERE + node restart + INSERT into base table -> Unknown function error / WriteFailure
+https://issues.apache.org/jira/browse/CASSANDRA-16868  # buggy 4.0.0; [1node,H] CREATE INDEX on clustering key + INSERT + DELETE + UPDATE same row + SELECT by indexed col -> row not found (missing index entry)
+https://issues.apache.org/jira/browse/CASSANDRA-16898  # buggy 4.0.1; [1node,H] CREATE MATERIALIZED VIEW with no CLUSTERING ORDER on base table with DESC clustering -> MV defaults all columns to ASC instead of inheriting base order
+https://issues.apache.org/jira/browse/CASSANDRA-17266  # buggy 4.0.3; [1node,H] CREATE MV (no TTL) + DESCRIBE MATERIALIZED VIEW -> emits default_time_to_live=0 -> re-CREATE fails
+https://issues.apache.org/jira/browse/CASSANDRA-17467  # buggy 4.0.3; [1node,H] INSERT/SELECT with timestamp literal '2022-03-20 12:48:56 +0530' (space before tz) -> InvalidRequest 'Unable to parse a date/time'
+https://issues.apache.org/jira/browse/CASSANDRA-17623  # buggy 4.0.4; [1node,H] INSERT unsorted frozen<map> via bound parameter + SELECT c['key'] -> NULL / 0 rows
+https://issues.apache.org/jira/browse/CASSANDRA-17848  # buggy 4.1.0; [1node,H] CREATE FUNCTION with quoted name containing [type-like bracket] + LIST EXECUTE OF user -> wrong/failed resource name
+https://issues.apache.org/jira/browse/CASSANDRA-17913  # buggy 4.1.1; [1node,H] Frozen collection clustering column with CLUSTERING ORDER DESC + SELECT c['key'] -> InvalidRequestException 'is not a collection'
+https://issues.apache.org/jira/browse/CASSANDRA-17918  # buggy 4.1.1; [1node,H] CREATE TYPE with reserved-keyword fields ("token", "desc") + DESCRIBE TYPE -> unquoted output that fails on re-import
+https://issues.apache.org/jira/browse/CASSANDRA-17919  # buggy 4.1.1; [1node,H] CREATE TABLE P (k INT PRIMARY KEY) -> SyntaxException 'no viable alternative at input P' (capital P parsed as Duration)
+https://issues.apache.org/jira/browse/CASSANDRA-18647  # buggy 4.1.2; [1node,H] CAST a float column to decimal -> result has spurious extra digits (float->double->decimal path)
+https://issues.apache.org/jira/browse/CASSANDRA-19475  # buggy 4.1.4; [1node,H] SELECT value FROM system_views.settings WHERE name='data_file_directories' -> returns '[Ljava.lang.String;@...' instead of the directory list
+https://issues.apache.org/jira/browse/CASSANDRA-19566  # buggy 4.1.4; [1node,H] INSERT timestamp -13767019200000 + SELECT ts vs toJson(ts)/SELECT JSON -> dates differ (1533-09-28 vs 1533-09-18)
+https://issues.apache.org/jira/browse/CASSANDRA-19637  # buggy 4.1.5; [1node,H] UPDATE ... IF l < [1,2] on a null collection -> [false,null] (frozen) vs [true] (non-frozen); IF colA >= [] returns true while >= null errors
+https://issues.apache.org/jira/browse/CASSANDRA-19749  # buggy 4.1.5; [1node,H] ALTER USER IF EXISTS missing_user SUPERUSER -> creates the role (superuser) instead of no-op
+https://issues.apache.org/jira/browse/CASSANDRA-19880  # buggy 5.0.0; [1node,H] Prepared statement + UNSET a map column + tracing enabled -> execute -> IndexOutOfBoundsException
+https://issues.apache.org/jira/browse/CASSANDRA-19889  # buggy 5.0.1; [1node,H] frozen<list<int>> clustering key WITH CLUSTERING ORDER DESC + CREATE INDEX FULL(ck) -> InvalidRequestException, valid index rejected
+https://issues.apache.org/jira/browse/CASSANDRA-19891  # buggy 5.0.4; [1node,H] SAI indexes incl. a CompositeType-with-MapType column + multi-column WHERE + ALLOW FILTERING -> query plan fails (single-column case passes)
+https://issues.apache.org/jira/browse/CASSANDRA-20086  # buggy 5.0.6; [1node,H] INSERT vector + flush + overwrite vector to better/worse position + SELECT ORDER BY val ann of [..] LIMIT k -> wrong ranked rows
+https://issues.apache.org/jira/browse/CASSANDRA-20108  # buggy 5.0.2; [1node,H] INSERT row + delete all non-key columns + SELECT ... WHERE s0 = ? ALLOW FILTERING -> IndexOutOfBoundsException (null/empty value not handled) [ALREADY IMPLEMENTED: cassandra_20108.py]
+https://issues.apache.org/jira/browse/CASSANDRA-20238  # buggy 5.0.3; [1node,H] SAI index + UPDATE static/value + partition DELETE + UPDATE + flush + SELECT WHERE v0=.. AND pk0=.. ALLOW FILTERING -> missing row
+
+### Storage engine — 25 (13 high, 12 medium)
+https://issues.apache.org/jira/browse/CASSANDRA-14013  # buggy 4.1.0; [1node,H] CREATE KEYSPACE snapshots + insert rows + restart cassandra -> table empty / rows lost
+https://issues.apache.org/jira/browse/CASSANDRA-14204  # buggy 4.1.2; [1node,H] only_purge_repaired_tombstones=true + unrepaired sstables + nodetool garbagecollect -> AssertionError
+https://issues.apache.org/jira/browse/CASSANDRA-15135  # buggy 4.0.0; [1node,H] CREATE CUSTOM INDEX (SASI) with illegal tokenizer options -> RuntimeException + node fails to start on restart
+https://issues.apache.org/jira/browse/CASSANDRA-15669  # buggy 3.11.10; [1node,H] LCS table with small fanout_size/sstable_size + stress writes filling many levels -> ArrayIndexOutOfBoundsException compacting last level, halts L1+ compaction
+https://issues.apache.org/jira/browse/CASSANDRA-18105  # buggy 4.1.1; [1node,H] CREATE INDEX + TRUNCATE + DROP INDEX + flush + kill + restart -> truncated row comes back [ALREADY IMPLEMENTED: cassandra_18105.py]
+https://issues.apache.org/jira/browse/CASSANDRA-18118  # buggy 4.1.0; [1node,H] table with 10s TTL+gc_grace + sustained inserts -> synthetic 2015 Epoch leaks into memtable minTimestamp -> expired sstables never cleaned, disk grows forever
+https://issues.apache.org/jira/browse/CASSANDRA-18756  # buggy 4.1.3; [1node,H] TWCS table with unsafe_aggressive_sstable_expiration=true + compaction -> overlap iterator kept -> obsolete SSTables never deleted
+https://issues.apache.org/jira/browse/CASSANDRA-18760  # buggy 4.0.11; [1node,H] DROP a 'map' column then ADD it back as 'blob' -> on-disk corruption unfixable by scrub
+https://issues.apache.org/jira/browse/CASSANDRA-19401  # buggy 4.1.4; [1node,H] nodetool import --copy-data ks tbl /flat_path (no ks/tbl subdirs) -> 'No new SSTables were found' instead of importing
+https://issues.apache.org/jira/browse/CASSANDRA-19747  # buggy 4.1.5; [1node,H] ALTER TABLE DROP (col2, col3) then nodetool snapshot -> schema.cql missing comma -> invalid CQL, restore fails
+https://issues.apache.org/jira/browse/CASSANDRA-20036  # buggy 5.0.2; [1node,H] frozen UDT as DESC clustering key -> snapshot getReferencedUserTypes misses the UDT (ReverseType) -> recreate CQL omits CREATE TYPE
+https://issues.apache.org/jira/browse/CASSANDRA-20313  # buggy 5.0.3; [1node,H] INSERT empty bytes into int column + flush + CREATE SAI INDEX on it -> NPE, index build fails
+https://issues.apache.org/jira/browse/CASSANDRA-20449  # buggy 5.0.3; [ring,H] UPDATE with multiple collections in one row (set replacement + appends) serialized to peer -> complex deletion lost, replica shows merged set
+https://issues.apache.org/jira/browse/CASSANDRA-10968  # buggy 3.11.6; [1node,M] table with secondary index + nodetool snapshot -> manifest.json missing/incorrect file list
+https://issues.apache.org/jira/browse/CASSANDRA-12734  # buggy 4.0.1; [1node,M] table with materialized view + nodetool snapshot -> MV schema file written as a CREATE TABLE instead of CREATE MATERIALIZED VIEW
+https://issues.apache.org/jira/browse/CASSANDRA-13935  # buggy 3.11.8; [1node,M] snapshot table with secondary index + replay generated schema.cql -> CREATE INDEX without IF NOT EXISTS fails on restore
+https://issues.apache.org/jira/browse/CASSANDRA-14113  # buggy 3.11.13; [1node,M] thrift supercolumn sstables from 2.2 + nodetool upgradesstables on 3.11 -> AssertionError in CellGrouper/compaction
+https://issues.apache.org/jira/browse/CASSANDRA-14349  # buggy 3.11.9; [1node,M] enable CDC + no CDC traffic + restart Cassandra repeatedly -> hard links pile up in cdc_raw, never cleaned
+https://issues.apache.org/jira/browse/CASSANDRA-14496  # buggy 4.0.0; [1node,M] TWCS table with unchecked_tombstone_compaction=true but no tombstone_threshold/interval set -> tombstone compactions never run
+https://issues.apache.org/jira/browse/CASSANDRA-15134  # buggy 4.0.1; [1node,M] create SASI index, write+flush new sstables, nodetool snapshot -> SASI index files missing from the snapshot
+https://issues.apache.org/jira/browse/CASSANDRA-15164  # buggy 3.11.8; [1node,M] partition with cell count exceeding histogram bound -> IllegalStateException (histogram overflowed) + compactions blocked
+https://issues.apache.org/jira/browse/CASSANDRA-15191  # buggy 3.11.7; [1node,M] set disk_failure_policy=stop_paranoid + corrupt an sstable + SELECT -> policy ignored, node keeps serving instead of stopping gossip/transport
+https://issues.apache.org/jira/browse/CASSANDRA-15924  # buggy 3.11.6; [ring,M] Read repair (empty slice) or paging with empty final page emits empty range tombstone, then inserting a covering RT -> AssertionError in RangeTombstoneList
+https://issues.apache.org/jira/browse/CASSANDRA-15970  # buggy 3.11.7; [1node,M] collection range tombstone written in 2.1 + collection dropped + upgrade -> empty row with null clustering -> startup crash on commitlog replay
+https://issues.apache.org/jira/browse/CASSANDRA-16071  # buggy 3.11.7; [1node,M] set max_compaction_flush_memory_in_mb=512 (treated as bytes) + large SASI compaction -> millions of temp files -> OOM Map Error
+
+### Distributed / multi-node — 25 (9 high, 16 medium)
+https://issues.apache.org/jira/browse/CASSANDRA-12525  # buggy 4.1.0; [ring,H] auth-enabled cluster, alter cassandra password, add new nodes + decommission originals -> credentials revert to default
+https://issues.apache.org/jira/browse/CASSANDRA-15433  # buggy 4.0.1; [ring,H] node in BOOT mode + CREATE KEYSPACE + writes -> joining node receives zero writes for the new keyspace (data loss after bootstrap)
+https://issues.apache.org/jira/browse/CASSANDRA-15459  # buggy 3.11.7; [ring,H] 2-node RF=2 with per-replica divergent writes/deletes + SELECT ... GROUP BY pk LIMIT 1 -> returns deleted row instead of no data
+https://issues.apache.org/jira/browse/CASSANDRA-16334  # buggy 4.0.1; [ring,H] INSERT a mutation larger than max_mutation_size_in_kb on a 2-DC (RF=3 each) keyspace -> WriteTimeout instead of WriteFailure
+https://issues.apache.org/jira/browse/CASSANDRA-16577  # buggy 3.11.10; [ring,H] 3-node cluster + decommission/remove 2 nodes + create keyspace + set allocate_tokens_for_keyspace + re-add node -> startup fails on schema-agreement timeout
+https://issues.apache.org/jira/browse/CASSANDRA-16692  # buggy 3.11.10; [ring,H] shut down a node, change schema on others, then replace the (stale-schema) terminated node -> replacement startup fails on schema-agreement timeout
+https://issues.apache.org/jira/browse/CASSANDRA-18824  # buggy 4.1.3; [ring,H] 2-node RF=1, decommission node1 while looping nodetool cleanup on node2 -> cleanup ignores pending ranges -> rows lost
+https://issues.apache.org/jira/browse/CASSANDRA-20189  # buggy 5.0.3; [ring,H] SAI index match (repaired) + multiple non-indexed predicates + per-replica split row -> wrong/missing rows
+https://issues.apache.org/jira/browse/CASSANDRA-20243  # buggy 5.0.3; [ring,H] RF=3 split writes across replicas + SELECT WHERE ck1=.. ALLOW FILTERING (no static predicate) -> extra non-matching row returned
+https://issues.apache.org/jira/browse/CASSANDRA-12949  # buggy 3.11.10; [ring,M] JMX CFS.setCompressionParameters on one node + later ALTER on that table -> local change disseminated to whole cluster
+https://issues.apache.org/jira/browse/CASSANDRA-14463  # buggy 4.0.0; [ring,M] replace_address + node listed in its own seed list + initial_token unset -> node generates new random tokens and joins ring
+https://issues.apache.org/jira/browse/CASSANDRA-14559  # buggy 3.11.7; [ring,M] replace_address same IP, stop mid-bootstrap, restart without flag, stop again -> node removed from gossip after 30s (FatClient)
+https://issues.apache.org/jira/browse/CASSANDRA-15899  # buggy 3.11.8; [ring,M] DROP a regular column on one node, query a replica that hasn't received the schema change -> IllegalStateException 'not a subset'
+https://issues.apache.org/jira/browse/CASSANDRA-15902  # buggy 3.11.8; [ring,M] Start repair, call forceTerminateAllRepairSessions while validations in progress -> RepairJob thread parks forever on getUnchecked(validations), leaks threads -> OOM
+https://issues.apache.org/jira/browse/CASSANDRA-16146  # buggy 3.11.9; [ring,M] bootstrap fails (state BOOT/JOINING) + nodetool disablegossip + enablegossip -> setGossipTokens blindly flips state to NORMAL
+https://issues.apache.org/jira/browse/CASSANDRA-16156  # buggy 3.11.8; [ring,M] decommission a node -> peers still pick the LEFT node via maybeGossipToUnreachableMember -> repeated Connection refused log spam
+https://issues.apache.org/jira/browse/CASSANDRA-16418  # buggy 4.1.0; [ring,M] nodetool cleanup run concurrently with a bootstrap/decommission (pending ranges) -> streamed data silently deleted
+https://issues.apache.org/jira/browse/CASSANDRA-16518  # buggy 3.11.12; [ring,M] restart a node while another node is joining (NULL version in peers) -> protocol capped to V3, V4 clients rejected
+https://issues.apache.org/jira/browse/CASSANDRA-16718  # buggy 4.1.1; [ring,M] enable prefer_local + change a node's listen_address + restart -> node fails to join with 'Unable to gossip with any seeds'
+https://issues.apache.org/jira/browse/CASSANDRA-16796  # buggy 4.0.0; [ring,M] MOVE operation + graceful shutdown of moving node -> stale pending ranges -> bogus unavailable responses to clients
+https://issues.apache.org/jira/browse/CASSANDRA-16945  # buggy 4.0.1; [ring,M] Bootstrap a new node with strict consistency and RF > number of endpoints -> RangeStreamer picks multiple full sources -> bootstrap fails validation
+https://issues.apache.org/jira/browse/CASSANDRA-17411  # buggy 4.0.4; [ring,M] CL=ONE writes to a counter table + one node partitioned via iptables -> partitioned node keeps receiving traffic and timing out (vs C3 which stops)
+https://issues.apache.org/jira/browse/CASSANDRA-17507  # buggy 4.1.0; [ring,M] paged SELECT during 3.11.12->4.0.3 rolling upgrade -> PagingState clustering decode IllegalArgumentException 'newLimit > capacity'
+https://issues.apache.org/jira/browse/CASSANDRA-18304  # buggy 4.1.1; [ring,M] set hinted_handoff_enabled=false + write with a replica down/timing out -> hints still submitted (config not honored)
+https://issues.apache.org/jira/browse/CASSANDRA-18466  # buggy 4.1.3; [ring,M] nodetool repair --paxos-only -> triggers anti-compactions / stalls instead of finishing quickly (works only with --full --paxos-only)
+
+### Other runtime DB behavior — 25 (11 high, 14 medium)
+https://issues.apache.org/jira/browse/CASSANDRA-16127  # buggy 3.11.8; [1node,H] nodetool disablethrift (or thrift off) then nodetool enablethrift -> NullPointerException in StorageService.startRPCServer
+https://issues.apache.org/jira/browse/CASSANDRA-16372  # buggy 3.11.9; [1node,H] INSERT list<text> with an empty-string element + COPY TO then COPY FROM -> ParseError, row dropped (table empty)
+https://issues.apache.org/jira/browse/CASSANDRA-16902  # buggy 4.0.1; [1node,H] Role creates a child role then LIST ALL PERMISSIONS OF child -> 'not authorized to view child's permissions' (no default DESCRIBE grant)
+https://issues.apache.org/jira/browse/CASSANDRA-17136  # buggy 4.0.1; [1node,H] nodetool enablefullquerylog --path with an undeletable non-empty subdir -> AccessDeniedException -> disk_failure_policy stops transports/gossip
+https://issues.apache.org/jira/browse/CASSANDRA-17933  # buggy 4.0.6; [1node,H] Place a zero-byte .cq4 file in the audit log dir (audit logging enabled) + start node -> startup fails with OverlappingFileLockException
+https://issues.apache.org/jira/browse/CASSANDRA-18778  # buggy 4.1.3; [1node,H] Set empty keystore_password under client/server_encryption_options -> startup fails with ConfigurationException 'Failed to initialize SSL'
+https://issues.apache.org/jira/browse/CASSANDRA-18935  # buggy 4.1.3; [1node,H] Start with native transport off, run nodetool enablebinary, then do a counter update -> RpcReady stays false -> counter update gets no leader and fails
+https://issues.apache.org/jira/browse/CASSANDRA-19166  # buggy 4.1.3; [1node,H] many sequential schema changes (ALTERs) on one node -> nested UnmodifiableMap chain in TableMetadataRefCache -> StackOverflowError on get()
+https://issues.apache.org/jira/browse/CASSANDRA-20052  # buggy 5.0.2; [1node,H] V5 protocol: send huge AUTH_RESPONSE/CQL message (no size limit) -> memory pressure, GC death / DoS
+https://issues.apache.org/jira/browse/CASSANDRA-20171  # buggy 5.0.4; [1node,H] GRANT SELECT ON KEYSPACE system_views TO role -> InvalidRequest 'Resource doesn't exist'
+https://issues.apache.org/jira/browse/CASSANDRA-20787  # buggy 5.0.4; [1node,H] Set data_disk_usage_max_disk_size in cassandra.yaml on a fresh node whose data dir doesn't exist + start -> startup crash (NoSuchFileException)
+https://issues.apache.org/jira/browse/CASSANDRA-13874  # buggy 4.0.0; [1node,M] row cache disabled + nodetool setcachecapacity to enable it -> silent no-op, no error
+https://issues.apache.org/jira/browse/CASSANDRA-14477  # buggy 3.11.8; [1node,M] set initial_token in yaml without setting num_tokens -> startup aborts on spurious num_tokens mismatch check
+https://issues.apache.org/jira/browse/CASSANDRA-14925  # buggy 3.11.9; [1node,M] decimal column with huge negative scale (e.g. 1e-2147483641) read via a path calling DecimalSerializer.toString (SELECT JSON / tracing) -> OOM
+https://issues.apache.org/jira/browse/CASSANDRA-15857  # buggy 3.11.7; [1node,M] CQLSSTableWriter on UDT 'list<frozen<tuple<text,text>>>' -> RawTuple.toString drops frozen wrapper -> Non-frozen tuples not allowed error
+https://issues.apache.org/jira/browse/CASSANDRA-16259  # buggy 3.11.9; [1node,M] table with sstables having mismatched histogram bucket counts + nodetool tablehistograms -> ArrayIndexOutOfBoundsException
+https://issues.apache.org/jira/browse/CASSANDRA-16839  # buggy 4.0.1; [1node,M] restart node + nodetool listsnapshots -> spurious truncated-* snapshots of size_estimates/table_estimates each restart
+https://issues.apache.org/jira/browse/CASSANDRA-16977  # buggy 4.0.1; [1node,M] Reference/grant permission on a user function with zero arguments -> FunctionResource.fromName throws ArrayIndexOutOfBoundsException
+https://issues.apache.org/jira/browse/CASSANDRA-17342  # buggy 4.0.2; [ring,M] many vnodes + range-split incremental repairs populate system.repairs -> node restart processing takes 30+ minutes
+https://issues.apache.org/jira/browse/CASSANDRA-17367  # buggy 4.0.3; [ring,M] sstableloader with server_encryption_options configured -> ignores TLS, sends plaintext, connection closed by SSL-only server
+https://issues.apache.org/jira/browse/CASSANDRA-17415  # buggy 3.11.12; [1node,M] auto_snapshot:true + DROP MATERIALIZED VIEW -> snapshot directory name missing 'dropped-' prefix
+https://issues.apache.org/jira/browse/CASSANDRA-17752  # buggy 4.0.5; [1node,M] start with -Dcassandra.join_ring=false, nodetool disablebinary, then enablebinary -> throws (state STARTING, not NORMAL)
+https://issues.apache.org/jira/browse/CASSANDRA-17840  # buggy 4.0.5; [1node,M] resume paging with a V3 PagingState over a V4 native-protocol connection -> integer overflow -> IndexOutOfBoundsException
+https://issues.apache.org/jira/browse/CASSANDRA-18264  # buggy 4.1.0; [1node,M] load a trigger from a JAR on 4.1.0 -> CustomClassLoader fails to copy JAR (Files.copy won't overwrite) -> trigger does not load
+https://issues.apache.org/jira/browse/CASSANDRA-18294  # buggy 4.1.0; [1node,M] disk_failure_policy=die + inject filesystem error -> Cassandra only throws instead of shutting down gossip/transport and killing the JVM
+
+## --- Appendix: NEEDS-FIX-TEST (12) — stageable + observable, but the only reproducer is the fix's
+## unit/dtest (not in the issue body). Promote to the list above after fetching that test. ---
+https://issues.apache.org/jira/browse/CASSANDRA-15158  # buggy 3.11.9; [ring,M] bootstrap a node against a large/slow-schema cluster -> node proceeds without schema agreement or hangs on orphaned latches
+https://issues.apache.org/jira/browse/CASSANDRA-15897  # buggy 3.11.10; [1node,M] Table with 2.1-era sstables on disk + DROP COMPACT STORAGE -> existing sstables become unreadable
+https://issues.apache.org/jira/browse/CASSANDRA-15962  # buggy 3.11.9; [1node,M] read with certain column filter from memtable vs flushed sstable -> different digest
+https://issues.apache.org/jira/browse/CASSANDRA-16226  # buggy 3.11.9; [1node,M] COMPACT STORAGE table upgraded from 2.1 (no row timestamps) + multiple sstables + point read -> canRemoveRow cannot skip older sstables -> extra sstables read
+https://issues.apache.org/jira/browse/CASSANDRA-17072  # buggy 4.0.1; [1node,M] operation generating client warnings on a non-tracing executor stage -> warnings dropped, not returned to client
+https://issues.apache.org/jira/browse/CASSANDRA-17900  # buggy 4.0.6; [ring,M] Repair where two peers have overlapping mismatching ranges -> assertion failure in RangeMap
+https://issues.apache.org/jira/browse/CASSANDRA-18359  # buggy 4.1.1; [1node,M] start node 4.1.1 with a particular snapshot/data dir layout -> NPE in SnapshotLoader$Visitor.preVisitDirectory aborts startup
+https://issues.apache.org/jira/browse/CASSANDRA-19578  # buggy 4.1.4; [ring,M] two nodes issue identical CREATE statement concurrently -> differing mutation timestamps -> permanent schema-version disagreement
+https://issues.apache.org/jira/browse/CASSANDRA-20567  # buggy 5.0.4; [ring,M] SAI-indexed table + partial partition/row flushed due to repair + nodetool repair -> stream fails on missing SAI Meta.db component
+https://issues.apache.org/jira/browse/CASSANDRA-20670  # buggy 5.0.4; [ring,M] LWT at QUORUM on 3 nodes with peer failures -> accumulate() restarts from initialValue -> failure count stuck at 1 -> never throws WriteFailureException
+https://issues.apache.org/jira/browse/CASSANDRA-20753  # buggy 5.0.6; [ring,M] Bulk-load sstables over SSL -> BufferPoolAllocator.Wrapped buffer not released -> LEAK DETECTED
+https://issues.apache.org/jira/browse/CASSANDRA-20829  # buggy 5.0.5; [1node,M] TWCS table + TTL + secondary index, let SSTables fully expire + compact -> fully-expired SSTables skipped -> Indexer.removeRow never called -> index data not removed

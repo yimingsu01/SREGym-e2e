@@ -1,9 +1,18 @@
 # Reproduction progress — bugs.txt (Apache Cassandra DB-behavior bugs)
 
 ## Scope (current)
-`bugs.txt` was re-triaged from the original 100 cached Jira issues and rewritten to contain **only
-DB-behavior bugs** (CI/test-logic and internal-tooling dropped). **51 bugs** remain, grouped:
-cql-semantics 13, storage-engine 9, distributed-multinode 23, other-db-behavior 6.
+> **bugs.txt re-curation (2026-06-11).** After Phase 3, `bugs.txt` was pruned to keep only the **11
+> reproduced** bugs and extended with **100 freshly-collected candidates** (+ a 12-item needs-fix-test
+> appendix) drawn from a new Apache Jira sweep (1800 recent fixed bugs → 671 deployable → 433 after a
+> test-infra pre-filter → classified by a 25-agent workflow → 174 stageable/observable/in-body-or-derivable,
+> of which 100 were selected, 25/category, high-confidence first; 58 high + 42 medium). Candidates are
+> UNVERIFIED (text-triaged). The 40 non-reproduced bugs removed from the old list remain documented below
+> and in `repro-findings.md`. Classifier verdicts: `.claude/repro-evidence/classify_verdicts.json`.
+
+The notes below describe the original triage that produced the reproduced set. `bugs.txt` was re-triaged
+from the original 100 cached Jira issues and rewritten to contain **only DB-behavior bugs** (CI/test-logic
+and internal-tooling dropped). **51 bugs** were carried into Phase 3, grouped: cql-semantics 13,
+storage-engine 9, distributed-multinode 23, other-db-behavior 6.
 
 Reproduction uses the **stock-image fast path**: for a bug fixed in a released `X.Y.Z`, the buggy
 version is `patch − 1` and the official `cassandra:<buggy>` image already contains the bug, so a
