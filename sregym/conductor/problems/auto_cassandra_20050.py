@@ -45,3 +45,5 @@ CREATE TABLE events (
 INSERT INTO events (id, loc, val) VALUES (1, {x: 10, y: 20}, 'data');
 """
     continuous_reproducer = True
+    # 4.0.14 already ships the bug, so deploy the stock image instead of an ant-jar build.
+    prebuilt_from_stock = True

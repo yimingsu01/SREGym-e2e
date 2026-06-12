@@ -133,6 +133,148 @@ the oracle behavior with `continuous_reproducer` / `expected_output` / `crash_on
 with a continuous reproducer), and `auto_zookeeper_2213.py` for a stub. For source-patch bugs, point
 `patch_dir` at a directory of files to overlay before building.
 
+## Reproducing a Cassandra bug by hand (operational playbook)
+
+Validated on 85 Cassandra reproductions. The point of reproducing by hand first is to produce the evidence
+log that the Problem is then built from.
+
+**Stock-image fast path (use this for any deployable bug).** A bug fixed in a released `X.Y.Z` patch is
+present in the `cassandra:<X.Y.(Z-1)>` image, so the buggy version = **fix patch − 1** and the stock image
+already contains the bug — no source build. If the fix patch also has a released image, run the identical
+workload on it as an **A/B control**. Released-image ceilings on Docker Hub `library/cassandra`:
+**3.11→19, 4.0→20, 4.1→11, 5.0→8** (no `5.0.9 / 4.0.21 / 4.1.12 / 6.x / 7.x`). Bugs fixed only in trunk
+(`6.0-alpha*/6.0/6.x/7.x`) have no image → `blocked-no-image` (would need a source build).
+
+**Single-node** (CQL-semantics, most storage bugs): one stock pod, `MAX_HEAP_SIZE=1024M`,
+`CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch`; drive via `kubectl exec ... cqlsh`/`nodetool`.
+Config-gated bugs: append a `cassandra.yaml` block in the pod command before `docker-entrypoint.sh
+cassandra -f`. Compaction-iteration bugs: `nodetool disableautocompaction` + `INSERT`+`flush` ≥2× to
+retain ≥2 sstables, then the triggering `nodetool` command.
+
+**Multi-node ring** (distributed bugs): headless `Service` + `StatefulSet`
+(`podManagementPolicy: OrderedReady`, seed `cass-0`, `CASSANDRA_SEEDS=cass-0.cass.<ns>.svc...`); wait for
+`nodetool status` to show N × `UN`. To create **per-replica divergence** on the same partition key without
+an in-JVM dtest, use **gossip isolation**: `nodetool disablegossip` on the other nodes, confirm they show
+`DN` from the writer's view, write at `CONSISTENCY ONE` with explicit `USING TIMESTAMP`, `nodetool flush`,
+then re-enable gossip. Verify the physical divergence with `sstabledump` on each node's local `Data.db` —
+a `CL=ONE` read is routed to an arbitrary replica and is **not** a reliable per-node probe. (This
+reproduced CASSANDRA-21332, which looked "in-JVM-dtest-only".)
+
+**Evidence bar.** A reproduction needs a **verbatim** buggy signature (exact exception + frame, server
+error, or wrong-result row) plus the A/B control where a fixed image exists. Write it all to
+`.claude/repro-evidence/repro-CASSANDRA-<n>.md`.
+
+**Dispositions** (use the precise one; all but `reproduced` are clean outcomes): `reproduced` /
+`not-reproducible` (buggy path shadowed by earlier validation or a disabled feature) / `not-observable`
+(internal refinement, no client/operator-visible change — a poor benchmark candidate) / `confirmed-blocked`
+(name the un-stageable mechanism: in-JVM message interception or `executeInternal`, a precise
+timing/partition window, a crash between two syscalls, or no concrete reproducer) / `blocked-disk-constrained`
+(reproducer needs more data than the disk budget) / `needs-fix-test` (reproducer lives only in the fix's
+test) / `blocked-no-image` (trunk-only).
+
+**Triage before reproducing.** Filtering candidates first pays off: naive "DB-behavior" filtering reproduced
+~22%, whereas gating on an **observable symptom** + a **concrete/derivable reproducer** + a
+**stageable reproduction-shape** reproduced ~76%. Watch for cyber-safeguard false-positives on
+security/CVE/auth bugs (assess those read-only by hand). See **Running this at scale** below for the
+disk/concurrency discipline when reproducing or generating many at once.
+
+## From a reproduced bug to a benchmark Problem
+
+Every reproduced DB bug should become a runnable benchmark Problem. The **authoritative source** for each
+bug is its reproduction evidence log at `.claude/repro-evidence/repro-CASSANDRA-<n>.md` (machine-readable
+mirror: `.claude/repro-evidence/candidate_results.json`). Read it — not memory — for the buggy version, the
+EXACT reproducer steps, the verbatim buggy signature, and the A/B control. Trust the log over recollection.
+
+### Pick a base class
+
+| Base class | File | Discovery | Oracles | When |
+| --- | --- | --- | --- | --- |
+| `GenericCustomBuildProblem` | `auto_<db>_<number>.py` (e.g. `auto_cassandra_20050.py`) | **Auto** (`ProblemRegistry._load_auto_generated()`, no registry edit) | diagnosis **and** mitigation (mitigation only when `continuous_reproducer=True`) | **Preferred** for stock-reproducible Cassandra bugs in `bugs.txt`. |
+| `CassandraBugProblem` | `cassandra_<number>.py` (e.g. `cassandra_20108.py`, `cassandra_18105.py`) | **Manual** (import + `PROBLEM_REGISTRY` entry in `registry.py`) | diagnosis-only (`mitigation_oracle = None`) | Hand-written custom `inject_fault`, no mitigation oracle needed. |
+
+`GenericCustomBuildProblem` always gets a diagnosis `LLMAsAJudgeOracle` on the root cause; it *additionally*
+gets a `ReproducerPodMitigationOracle` on a looping reproducer pod **only when `continuous_reproducer=True`**.
+For a bug that already ships in the released image (buggy version = fix patch − 1), set
+`prebuilt_from_stock = True` so it deploys the STOCK buggy image instead of running a ~30-min source build
+(`ant jar`). `CassandraBugProblem` deploys a stock cluster via the K8ssandra operator and runs `trigger_cql`.
+
+### Pick the reproduction shape (read the evidence log first)
+
+- **Single-node, pure CQL** (CREATE/INSERT/DELETE/SELECT that triggers the bug): `GenericCustomBuildProblem`
+  with `reproducer` = the CQL block and `continuous_reproducer = True`. (`auto_cassandra_20050` style.)
+- **Wrong-result bug** (returns/persists an incorrect value rather than erroring): ALSO set `expected_output`
+  to the buggy value so the mitigation probe greps for it (Ready = bug present, NotReady = fixed).
+- **Config-gated** (needs a `cassandra.yaml` block such as `startup_checks`/`guardrails`, or a pre-staged
+  file): use `_setup_preconditions_sql` or override `setup_preconditions()`; for startup-failure bugs set
+  `crash_on_startup = True` (inject runs preconditions, swaps the buggy image, waits for CrashLoopBackOff).
+- **nodetool / flush sequence** (e.g. `disableautocompaction` + flush × N + `garbagecollect`): override
+  `inject_fault()` to run the nodetool steps via `kubectl exec` (see `cassandra_20108.py` for the
+  kubectl-exec + background-loop pattern), then run the CQL.
+- **Multi-node ring or cross-version** (per-replica divergence, scale/bootstrap, repair, `sstableloader`
+  between versions): these need multi-pod orchestration a single `reproducer` CQL string CANNOT express.
+  Write a **clearly-marked STUB** — set `db_version`/`source_git_ref`/`root_cause_*` and put the full
+  multi-node steps from the evidence log in a `reproducer`/docstring TODO — rather than flattening a
+  multi-node reproduction into one CQL. A flattened version **compiles and registers but silently does NOT
+  reproduce the bug**, which is worse than an honest stub.
+
+### Required fields (GenericCustomBuildProblem pattern)
+
+- `db_name = "cassandra"`
+- `db_version = <buggy>` (= released fix patch − 1)
+- `source_git_ref = "cassandra-<buggy>"`
+- `root_cause_file` (the buggy source file) and `root_cause_description` (1–3 sentences)
+- `reproducer` (the CQL/steps)
+- `continuous_reproducer = True`
+- `prebuilt_from_stock = True` for stock-image bugs (`bool | None`: `None` = inherit the `DBBuildSpec`
+  default; `True` = skip the build and re-tag the stock image)
+- `expected_output` **only** for wrong-result bugs
+
+### Oracle semantics
+
+Diagnosis = `LLMAsAJudgeOracle(expected=root_cause)`. Mitigation = `ReproducerPodMitigationOracle` with
+`expect_unready = (expected_output is not None)` — see **Oracles & readiness semantics** below for the full
+Ready/NotReady mapping (wrong-result: Ready = bug present; error/crash: NotReady = bug present).
+
+### Registration
+
+`auto_*.py` whose class subclasses `GenericCustomBuildProblem` are auto-discovered (the loader checks
+`issubclass(GenericCustomBuildProblem)`); the problem id is the file stem (e.g. `auto_cassandra_20050`).
+`cassandra_*.py` / `CassandraBugProblem` need a manual `import` + a `PROBLEM_REGISTRY` entry in `registry.py`.
+
+### Verify STATICALLY only (CRITICAL)
+
+NEVER instantiate or deploy a generated Problem to "verify" it — `__init__` triggers the image build /
+operator deploy and is slow and disk-heavy. Instead:
+
+1. `uv run python -m py_compile <file>` — it parses.
+2. Confirm `ProblemRegistry()` registers the id (e.g. `<id> in ProblemRegistry().PROBLEM_REGISTRY`). The
+   loader **stores the class and does NOT call `__init__`**, so this check is cheap and safe.
+3. Spot-check that the encoded `reproducer` matches the **buggy** path in the evidence log (not the A/B
+   control).
+
+## Running this at scale
+
+When reproducing or generating many problems at once (dozens+), the binding constraints are **disk** and
+**workflow orchestration**. Hard-won discipline (see also the `workflow-fanout-at-scale` skill for the
+general patterns):
+
+- **Disk first.** Each Cassandra pod/ring is heavy; a small host disk (the run here had 63 GiB) fills fast.
+  Run reproductions in **bounded-concurrency waves** (a worker pool of 3-8, not unbounded), `kubectl delete
+  ns` after each agent, and `crictl rmi --prune` inside the kind nodes between waves — accumulated images
+  in the kind nodes' containerds (not pod data) are the main hog and pruning reclaims many GiB at once.
+  Tear down idle clusters you no longer need. Problem **generation** (writing `auto_*.py`) is code-gen and
+  disk-light, so it can run at full parallelism.
+- **Pilot-gate** any large fan-out: run ~10 first, verify teardown actually happened, the `reproduced`
+  verdicts have their verbatim signature present in the log, and the rate is sane — then release the rest.
+- **Pass batches via a file**, not workflow `args` (args delivery proved unreliable): write
+  `/tmp/repro_batch.json` and have a trivial reader agent return it.
+- **Worker pool over chunked parallel:** a chunk barrier lets one slow agent block its whole chunk; a pool
+  lets a slow agent occupy only its own slot.
+- **Idempotent/resumable:** skip any item with a per-item done-marker (here, `/tmp/repro-<key>.md`), so a
+  re-run only does what's left.
+- **Verify code-gen statically** (`py_compile` + `ProblemRegistry()` loads the class) — **never instantiate
+  a Problem to verify it**, because instantiation triggers the image build / cluster deploy.
+
 ## Adding a new database
 
 Add a `DBBuildSpec` entry to `DB_REGISTRY` in `sregym/service/db_build_spec.py` describing the four phases

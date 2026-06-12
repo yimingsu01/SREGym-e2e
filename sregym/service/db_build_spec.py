@@ -83,7 +83,8 @@ class DBBuildSpec:
     # Returns a Kubernetes manifest (ConfigMap + Deployment) that continuously
     # runs the reproducer on the cluster so the bug stays observable.
     # Called as: reproducer_workload_fn(cluster_name, namespace, reproducer, expected_output) → str
-    # expected_output: correct value for wrong-result bugs; None for error/crash bugs.
+    # expected_output: the BUGGY value for wrong-result bugs (the probe greps for it, so
+    # Ready = bug present); None for error/crash bugs. See ReproducerPodMitigationOracle.
     reproducer_workload_fn: Callable[[str, str, str, str | None], str] | None = field(default=None)
 
     # Extra --set / --values flags appended to the Helm operator install command.

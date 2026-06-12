@@ -172,8 +172,9 @@ class GenericCustomBuildProblem(Problem):
     # Script/query to run after the buggy image is active to trigger the bug.
     # If not set, populated from the parsed issue body.
     reproducer: str | None = None
-    # For wrong-result bugs: the correct value the query should return.
-    # Drives the readiness probe — Not Ready when wrong result, Ready when fixed.
+    # For wrong-result bugs: the BUGGY value the query returns/persists (NOT the correct
+    # value). The reproducer-pod readiness probe greps for this value, so Ready = bug still
+    # present, Not Ready = fixed (see ReproducerPodMitigationOracle and the skill's oracle notes).
     expected_output: str | None = None
     continuous_reproducer: bool = False
     # Set True for bugs that crash the DB process on startup (not at query time).
@@ -193,6 +194,11 @@ class GenericCustomBuildProblem(Problem):
     # corresponding fields on the shared DBBuildSpec *for this problem only*.
     build_cmd: str | None = None
     build_image: str | None = None
+    # When True, skip compilation: the "custom" buggy image is the stock base
+    # image re-tagged (used when the bug already ships in the released image,
+    # i.e. buggy version = fix patch - 1). Overrides DBBuildSpec.prebuilt_from_stock
+    # for this problem only. Leave None to inherit the spec default.
+    prebuilt_from_stock: bool | None = None
 
     # ── Init ─────────────────────────────────────────────────────────────────
 
@@ -209,6 +215,8 @@ class GenericCustomBuildProblem(Problem):
             overrides["build_cmd"] = self.build_cmd
         if self.build_image is not None:
             overrides["build_image"] = self.build_image
+        if self.prebuilt_from_stock is not None:
+            overrides["prebuilt_from_stock"] = self.prebuilt_from_stock
         if overrides:
             spec = dataclasses.replace(spec, **overrides)
             logger.info(f"[GenericCustomBuild] Per-problem spec overrides: {overrides}")
