@@ -8,7 +8,7 @@
 - Run one benchmark problem: `python main.py --problem misconfig_app_hotel_res --agent stratus --model gpt-5`.
 - Rebuild the isolated agent image after changing agent/container dependencies: `python main.py --agent stratus --model gpt-5 --force-build` or `bash docker/agents/build.sh`.
 - Generate and run a problem from an issue URL: `python main.py --create <github-issue-url> --agent stratus --model gpt-5`.
-- Useful `main.py` flags: `--n-attempts N` (repeat each problem), `--resume <results.csv>` (skip problems already in the CSV), `--judge-model`, `--noise` (Chaos Mesh noise injection), `--use-external-harness` (inject fault and exit, no agent), `--deploy-observability` (Prometheus/Jaeger/OTel/Loki), `--skip-openebs`.
+- Useful `main.py` flags: `--n-attempts N` (repeat each problem), `--resume <results.csv>` (skip problems already in the CSV), `--judge-model`, `--agent-timeout SECONDS` (per-problem agent budget after deployment, default 1800), `--noise` (Chaos Mesh noise injection), `--use-external-harness` (inject fault and exit, no agent), `--deploy-observability` (Prometheus/Jaeger/OTel/Loki), `--skip-openebs`.
 - Interactive developer CLI (talks to the in-process Conductor for testing problems, not for benchmarking): `python cli.py`, then `start <problem_id>`.
 - Run only a problem's mitigation oracle against an already-deployed, already-injected cluster: `python run-oracle.py --problem <problem_id>`.
 - Run problems distributed across nodes (e.g. CloudLab/self-hosted): `uv run python -m distributed --hosts distributed_hosts.yaml --agent stratus --model gpt-5`.
