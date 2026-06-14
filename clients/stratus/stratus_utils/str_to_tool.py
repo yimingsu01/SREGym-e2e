@@ -15,7 +15,7 @@ from clients.stratus.tools.kubectl_tools import (
     RollbackCommand,
 )
 from clients.stratus.tools.prometheus_tools import get_metrics
-from clients.stratus.tools.rebuild_tools import rebuild_cassandra, rebuild_status
+from clients.stratus.tools.rebuild_tools import rebuild_cassandra, rebuild_database, rebuild_status
 from clients.stratus.tools.submit_tool import fake_submit_tool, rollback_submit_tool, submit_tool
 from clients.stratus.tools.text_editing.file_manip import create, edit, goto_line, insert, open_file
 from clients.stratus.tools.wait_tool import wait_tool
@@ -90,7 +90,9 @@ def str_to_tool(tool_struct: dict[str, str]):
         return insert
     elif tool_struct["name"] == "create_file":
         return create
-    # Cassandra rebuild tools for code-level bug fixing
+    # Source rebuild tools for code-level bug fixing
+    elif tool_struct["name"] == "rebuild_database":
+        return rebuild_database
     elif tool_struct["name"] == "rebuild_cassandra":
         return rebuild_cassandra
     elif tool_struct["name"] == "rebuild_status":

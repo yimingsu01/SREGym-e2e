@@ -6,7 +6,7 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sregym.service.container_runner import ContainerConfig, ContainerRunner, ExecInput
+from sregym.service.container_runner import EGRESS_OPEN, ContainerConfig, ContainerRunner, ExecInput
 
 from .agent_registry import AgentRegistration
 
@@ -47,17 +47,22 @@ class AgentLauncher:
     def enable_container_isolation(self, force_build: bool = False):
         """Initialize the container runner and build/check the image."""
         if not self._container_runner:
+            egress_mode = os.environ.get("SREGYM_AGENT_EGRESS", EGRESS_OPEN).strip().lower() or EGRESS_OPEN
+            allowlist = [h for h in os.environ.get("SREGYM_AGENT_EGRESS_ALLOWLIST", "").split(",") if h.strip()]
             config = ContainerConfig(
                 kubeconfig_path=Path(self._agent_kubeconfig_path) if self._agent_kubeconfig_path else None,
                 logs_path=Path("./logs"),
                 sregym_apps_path=Path("./SREGym-applications"),
                 sregym_app_subdirs=["socialNetwork/wrk2", "hotelReservation/wrk2"],
+                egress_mode=egress_mode,
+                egress_allowlist=allowlist,
             )
             self._container_runner = ContainerRunner(config)
             if force_build:
                 self._container_runner.build_image()
             else:
                 self._container_runner.ensure_image_exists()
+            self._container_runner.prepare_egress()
 
     async def ensure_started(self, reg: AgentRegistration) -> AgentProcess | None:
         if not reg or not reg.kickoff_command:
@@ -127,7 +132,9 @@ class AgentLauncher:
         agent_logs_dir = os.environ.get("AGENT_LOGS_DIR")
         self._container_runner.config.logs_path = Path(agent_logs_dir) if agent_logs_dir else Path(f"./logs/{reg.name}")
         self._container_runner.config.workspace_path = None
-        self._container_runner.config.source_code_path = Path(self._source_code_path) if self._source_code_path else None
+        self._container_runner.config.source_code_path = (
+            Path(self._source_code_path) if self._source_code_path else None
+        )
 
         composite_cmd = self._container_runner.build_composite_command(
             install_script=reg.install_script,

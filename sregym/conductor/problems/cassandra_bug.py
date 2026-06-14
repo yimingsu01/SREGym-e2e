@@ -7,7 +7,6 @@ the root cause in the source code.
 """
 
 import logging
-from pathlib import Path
 
 from sregym.conductor.oracles.llm_as_a_judge.llm_as_a_judge_oracle import LLMAsAJudgeOracle
 from sregym.conductor.problems.base import Problem
@@ -54,12 +53,17 @@ class CassandraBugProblem(Problem):
         self.kubectl = KubeCtl()
         self.source_manager = SourceManager()
 
-        # Clone source code on the host for bind-mounting into the agent container
-        self.source_code_path = self.source_manager.ensure_source(
+        # Clone source code on the host, then export a git-free, identity-scrubbed
+        # copy for the agent mount. The agent edits/rebuilds the EXPORT; the raw
+        # clone (with .git + upstream remote) is never mounted, so the agent cannot
+        # `git log`/`git diff`/`git fetch` the upstream fix. Re-exporting each run
+        # also resets any edits a previous agent left behind.
+        clone_path = self.source_manager.ensure_source(
             repo_url=CASSANDRA_REPO_URL,
             git_ref=self.source_git_ref,
             name="cassandra",
         )
+        self.source_code_path = self.source_manager.export_clean_copy(clone_path)
 
         self.root_cause = self.build_structured_root_cause(
             component=f"source/{self.root_cause_file}",
@@ -73,7 +77,6 @@ class CassandraBugProblem(Problem):
         # No mitigation oracle — these are source-code bugs, not infrastructure issues
         self.mitigation_oracle = None
 
-
     @mark_fault_injected
     def inject_fault(self):
         """Trigger the bug by executing the CQL statements that reproduce it."""
@@ -85,7 +88,9 @@ class CassandraBugProblem(Problem):
             # The trigger CQL may produce an error response from the server —
             # that error IS the bug manifesting. Log it clearly.
             logger.info(f"[CassandraBug] CQL trigger produced error (this may be expected): {e}")
-        logger.info("[CassandraBug] Fault injection complete — IndexOutOfBoundsException should now be in Cassandra logs (check server-system-logger container)")
+        logger.info(
+            "[CassandraBug] Fault injection complete — IndexOutOfBoundsException should now be in Cassandra logs (check server-system-logger container)"
+        )
 
     @mark_fault_injected
     def recover_fault(self):

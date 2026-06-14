@@ -12,8 +12,8 @@ DB_REGISTRY maps a short name (e.g. "cassandra") to its DBBuildSpec so that
 problem classes only need to declare ``db_name = "cassandra"``.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 
 @dataclass
@@ -123,6 +123,7 @@ class DBBuildSpec:
 
 # ── Per-DB functions ──────────────────────────────────────────────────────────
 
+
 def _cassandra_image_patch(_cluster: str, _ns: str, image: str) -> dict:  # type: ignore[override]
     return {"spec": {"cassandra": {"serverImage": image}}}
 
@@ -170,13 +171,16 @@ spec:
 
 def _ensure_cert_manager() -> None:
     """Install cert-manager if not already present (required by K8ssandra webhooks)."""
-    import subprocess
     import logging
+    import subprocess
+
     log = logging.getLogger(__name__)
 
     result = subprocess.run(
         "kubectl get namespace cert-manager --ignore-not-found",
-        shell=True, capture_output=True, text=True,
+        shell=True,
+        capture_output=True,
+        text=True,
     )
     if "cert-manager" in result.stdout:
         return
@@ -184,15 +188,18 @@ def _ensure_cert_manager() -> None:
     log.info("Installing cert-manager (required by K8ssandra operator)...")
     subprocess.run(
         "kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml",
-        shell=True, check=True,
+        shell=True,
+        check=True,
     )
     subprocess.run(
         "kubectl wait --for=condition=Available deployment --all -n cert-manager --timeout=120s",
-        shell=True, check=True,
+        shell=True,
+        check=True,
     )
     subprocess.run(
         "kubectl wait pod --all -n cert-manager --for=condition=Ready --timeout=120s",
-        shell=True, check=True,
+        shell=True,
+        check=True,
     )
     log.info("cert-manager ready")
 
@@ -258,13 +265,16 @@ spec:
 
 def _ensure_tidb_crds() -> None:
     """Install TiDB CRDs if not already present."""
-    import subprocess
     import logging
+    import subprocess
+
     log = logging.getLogger(__name__)
 
     result = subprocess.run(
         "kubectl get crd tidbclusters.pingcap.com --ignore-not-found",
-        shell=True, capture_output=True, text=True,
+        shell=True,
+        capture_output=True,
+        text=True,
     )
     if "tidbclusters" in result.stdout:
         return
@@ -272,16 +282,19 @@ def _ensure_tidb_crds() -> None:
     log.info("Installing TiDB CRDs...")
     subprocess.run(
         "kubectl apply --server-side -f https://raw.githubusercontent.com/pingcap/tidb-operator/v1.6.0/manifests/crd.yaml",
-        shell=True, check=True,
+        shell=True,
+        check=True,
     )
     log.info("TiDB CRDs installed")
 
 
 # ── Reproducer runners ───────────────────────────────────────────────────────
 
+
 def _cassandra_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> None:
-    import subprocess
     import logging
+    import subprocess
+
     log = logging.getLogger(__name__)
     svc = f"{cluster_name}-dc1-service.{namespace}.svc.cluster.local"
     pod = "cassandra-cql-client"
@@ -290,20 +303,28 @@ def _cassandra_run_reproducer(cluster_name: str, namespace: str, reproducer: str
     try:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
         subprocess.run(
             f"kubectl run {pod} --image=cassandra:4.1 --restart=Never -n {namespace} -- sleep 3600",
-            shell=True, check=True, capture_output=True,
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             f"kubectl wait pod/{pod} -n {namespace} --for=condition=Ready --timeout=120s",
-            shell=True, check=True, capture_output=True,
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         result = subprocess.run(
             f"kubectl exec -i {pod} -n {namespace} -- cqlsh {svc}",
-            shell=True, input=reproducer,
-            capture_output=True, text=True, timeout=120,
+            shell=True,
+            input=reproducer,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         stderr = result.stderr.strip()
         if result.returncode == 0:
@@ -315,13 +336,15 @@ def _cassandra_run_reproducer(cluster_name: str, namespace: str, reproducer: str
     finally:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found --wait=false",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
 
 
 def _tidb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> None:
-    import subprocess
     import logging
+    import subprocess
+
     log = logging.getLogger(__name__)
     svc = f"{cluster_name}-tidb.{namespace}.svc.cluster.local"
     pod = "tidb-sql-client"
@@ -329,31 +352,34 @@ def _tidb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> 
     # Wrap reproducer in a fresh temp database to avoid table-exists errors and
     # DROP DATABASE IF EXISTS raising ERROR 1008 on TiDB when DB doesn't exist.
     db_name = "sregym_oneshot"
-    reproducer = (
-        f"CREATE DATABASE IF NOT EXISTS `{db_name}`;\n"
-        f"USE `{db_name}`;\n"
-        + reproducer
-    )
+    reproducer = f"CREATE DATABASE IF NOT EXISTS `{db_name}`;\nUSE `{db_name}`;\n" + reproducer
 
     log.info("[Reproducer] Running TiDB SQL reproducer")
     try:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
         subprocess.run(
             f"kubectl run {pod} --image=mysql:8.0 --restart=Never -n {namespace} -- sleep 3600",
-            shell=True, check=True, capture_output=True,
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             f"kubectl wait pod/{pod} -n {namespace} --for=condition=Ready --timeout=120s",
-            shell=True, check=True, capture_output=True,
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         result = subprocess.run(
-            f"kubectl exec -i {pod} -n {namespace} -- "
-            f"mysql -h {svc} -P 4000 -u root --connect-timeout=15",
-            shell=True, input=reproducer,
-            capture_output=True, text=True, timeout=120,
+            f"kubectl exec -i {pod} -n {namespace} -- mysql -h {svc} -P 4000 -u root --connect-timeout=15",
+            shell=True,
+            input=reproducer,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         stderr = result.stderr.strip()
         if result.returncode == 0:
@@ -365,11 +391,13 @@ def _tidb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> 
     finally:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found --wait=false",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
 
 
 # ── Continuous reproducer workloads ──────────────────────────────────────────
+
 
 def _strip_sql_db_setup(sql: str) -> str:
     """Remove CREATE DATABASE / USE statements from a SQL reproducer.
@@ -380,6 +408,7 @@ def _strip_sql_db_setup(sql: str) -> str:
     database.
     """
     import re
+
     lines = []
     for line in sql.splitlines():
         stripped = line.strip()
@@ -434,6 +463,8 @@ kind: ConfigMap
 metadata:
   name: {cluster_name}-reproducer
   namespace: {namespace}
+  labels:
+    sregym.io/internal: "true"
 data:
   {script_filename}: |
 {indented}{probe_entry}
@@ -446,6 +477,7 @@ metadata:
   labels:
     app.kubernetes.io/name: reproducer
     app.kubernetes.io/instance: {cluster_name}
+    sregym.io/internal: "true"
 spec:
   replicas: 1
   selector:
@@ -455,6 +487,7 @@ spec:
     metadata:
       labels:
         app: {cluster_name}-reproducer
+        sregym.io/internal: "true"
     spec:
       volumes:
       - name: script
@@ -486,7 +519,7 @@ def _tidb_reproducer_workload(
     mysql = f"mysql -h {svc} -P 4000 -u root --connect-timeout=15"
     loop_cmd = (
         "while true; do "
-                'DB=sregym_$(date +%s); '
+        "DB=sregym_$(date +%s); "
         # printf preamble → cat script → pipe to mysql; no backtick quoting needed
         # for sregym_<timestamp> identifiers
         f'out=$(printf "SET GLOBAL tidb_mem_quota_query=0;\\nSET SESSION max_execution_time=15000;\\nCREATE DATABASE $DB;\\nUSE $DB;\\n" | cat - /scripts/run.sql | timeout 30 {mysql} --table 2>&1); '
@@ -518,17 +551,7 @@ def _tidb_reproducer_workload(
 
 def _mongodb_image_patch(_cluster: str, _ns: str, image: str) -> dict:  # type: ignore[override]
     return {
-        "spec": {
-            "statefulSet": {
-                "spec": {
-                    "template": {
-                        "spec": {
-                            "containers": [{"name": "mongod", "image": image}]
-                        }
-                    }
-                }
-            }
-        }
+        "spec": {"statefulSet": {"spec": {"template": {"spec": {"containers": [{"name": "mongod", "image": image}]}}}}}
     }
 
 
@@ -539,8 +562,9 @@ def _mongodb_cluster_manifest(
     custom_image: str | None,
 ) -> str:
     custom_image_override = (
-        f"\n        spec:\n          containers:\n          - name: mongod\n            image: \"{custom_image}\""
-        if custom_image else ""
+        f'\n        spec:\n          containers:\n          - name: mongod\n            image: "{custom_image}"'
+        if custom_image
+        else ""
     )
     return f"""\
 apiVersion: v1
@@ -587,34 +611,40 @@ spec:
 
 
 def _mongodb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> None:
-    import subprocess
     import logging
+    import subprocess
+
     log = logging.getLogger(__name__)
     svc = f"{cluster_name}-svc.{namespace}.svc.cluster.local"
-    conn = (
-        f"mongodb://admin:sregym-test-pass@{svc}:27017/admin"
-        f"?authSource=admin&replicaSet={cluster_name}"
-    )
+    conn = f"mongodb://admin:sregym-test-pass@{svc}:27017/admin?authSource=admin&replicaSet={cluster_name}"
     pod = "mongodb-mongosh-client"
 
     log.info("[Reproducer] Running MongoDB reproducer")
     try:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
         subprocess.run(
             f"kubectl run {pod} --image=mongo:6 --restart=Never -n {namespace} -- sleep 3600",
-            shell=True, check=True, capture_output=True,
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             f"kubectl wait pod/{pod} -n {namespace} --for=condition=Ready --timeout=120s",
-            shell=True, check=True, capture_output=True,
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         result = subprocess.run(
             f"kubectl exec -i {pod} -n {namespace} -- mongosh '{conn}' --quiet",
-            shell=True, input=reproducer,
-            capture_output=True, text=True, timeout=120,
+            shell=True,
+            input=reproducer,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         if result.returncode == 0:
             log.info(f"[Reproducer] Output: {result.stdout.strip()[:200]}")
@@ -625,7 +655,8 @@ def _mongodb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) 
     finally:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found --wait=false",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
 
 
@@ -633,13 +664,10 @@ def _mongodb_reproducer_workload(
     cluster_name: str, namespace: str, reproducer: str, expected_output: str | None
 ) -> str:
     svc = f"{cluster_name}-svc.{namespace}.svc.cluster.local"
-    conn = (
-        f"mongodb://admin:sregym-test-pass@{svc}:27017/admin"
-        f"?authSource=admin&replicaSet={cluster_name}"
-    )
+    conn = f"mongodb://admin:sregym-test-pass@{svc}:27017/admin?authSource=admin&replicaSet={cluster_name}"
     loop_cmd = (
         "while true; do "
-                f"out=$(mongosh '{conn}' --quiet < /scripts/run.js 2>&1); "
+        f"out=$(mongosh '{conn}' --quiet < /scripts/run.js 2>&1); "
         'rc=$?; [ -n "$out" ] && echo "$out"; '
         "sleep 10; done"
     )
@@ -652,10 +680,7 @@ def _mongodb_reproducer_workload(
             "exit 1\n"
         )
     else:
-        probe_script = (
-            "#!/bin/sh\n"
-            f"mongosh '{conn}' --quiet < /scripts/run.js > /dev/null 2>&1\n"
-        )
+        probe_script = f"#!/bin/sh\nmongosh '{conn}' --quiet < /scripts/run.js > /dev/null 2>&1\n"
     return _workload_manifest(cluster_name, namespace, "mongo:6", loop_cmd, reproducer, "run.js", probe_script)
 
 
@@ -666,41 +691,45 @@ def _cockroachdb_image_patch(_cluster: str, _ns: str, image: str) -> dict:  # ty
 
 
 def _cockroachdb_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> None:
-    import subprocess
     import logging
+    import subprocess
+
     log = logging.getLogger(__name__)
     svc = f"{cluster_name}-public.{namespace}.svc.cluster.local"
     pod = "cockroach-sql-client"
 
     # Wrap in a fresh temp DB so repeated runs can't collide on CREATE TABLE.
     db_name = "sregym_oneshot"
-    reproducer = (
-        f"CREATE DATABASE IF NOT EXISTS {db_name};\n"
-        f"USE {db_name};\n"
-        + reproducer
-    )
+    reproducer = f"CREATE DATABASE IF NOT EXISTS {db_name};\nUSE {db_name};\n" + reproducer
 
     log.info("[Reproducer] Running CockroachDB SQL reproducer")
     try:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
         # --command overrides the entrypoint so sleep runs via /bin/sh, not cockroach.
         subprocess.run(
             f"kubectl run {pod} --image=cockroachdb/cockroach:v24.1.4 "
             f"--restart=Never -n {namespace} --command -- /bin/sh -c 'sleep 3600'",
-            shell=True, check=True, capture_output=True,
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             f"kubectl wait pod/{pod} -n {namespace} --for=condition=Ready --timeout=120s",
-            shell=True, check=True, capture_output=True,
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         result = subprocess.run(
-            f"kubectl exec -i {pod} -n {namespace} -- "
-            f"cockroach sql --insecure --host={svc} --port=26257",
-            shell=True, input=reproducer,
-            capture_output=True, text=True, timeout=120,
+            f"kubectl exec -i {pod} -n {namespace} -- cockroach sql --insecure --host={svc} --port=26257",
+            shell=True,
+            input=reproducer,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         stderr = result.stderr.strip()
         if result.returncode == 0:
@@ -712,7 +741,8 @@ def _cockroachdb_run_reproducer(cluster_name: str, namespace: str, reproducer: s
     finally:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found --wait=false",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
 
 
@@ -727,7 +757,7 @@ def _cockroachdb_reproducer_workload(
     cockroach = f"cockroach sql --insecure --host={svc} --port=26257"
     loop_cmd = (
         "while true; do "
-        'DB=sregym_$(date +%s); '
+        "DB=sregym_$(date +%s); "
         f'out=$(printf "CREATE DATABASE $DB;\\nUSE $DB;\\n" | cat - /scripts/run.sql | timeout 30 {cockroach} 2>&1); '
         'rc=$?; if [ -n "$out" ]; then echo "$out"; else echo "(empty result set)"; fi; '
         f'{cockroach} -e "DROP DATABASE $DB CASCADE" > /dev/null 2>&1 || true; '
@@ -753,8 +783,13 @@ def _cockroachdb_reproducer_workload(
             "exit $rc\n"
         )
     return _workload_manifest(
-        cluster_name, namespace, "cockroachdb/cockroach:v24.1.4",
-        loop_cmd, reproducer, "run.sql", probe_script,
+        cluster_name,
+        namespace,
+        "cockroachdb/cockroach:v24.1.4",
+        loop_cmd,
+        reproducer,
+        "run.sql",
+        probe_script,
     )
 
 
@@ -764,7 +799,7 @@ def _cassandra_reproducer_workload(
     svc = f"{cluster_name}-dc1-service.{namespace}.svc.cluster.local"
     loop_cmd = (
         "while true; do "
-                f"out=$(cqlsh {svc} < /scripts/run.cql 2>&1); "
+        f"out=$(cqlsh {svc} < /scripts/run.cql 2>&1); "
         'rc=$?; [ -n "$out" ] && echo "$out"; '
         "sleep 10; done"
     )
@@ -779,14 +814,12 @@ def _cassandra_reproducer_workload(
     else:
         # Error/crash bug: Ready = query runs without error (bug fixed).
         # Not Ready = query errors (bug active) or DB unreachable.
-        probe_script = (
-            "#!/bin/sh\n"
-            f"cqlsh {svc} < /scripts/run.cql > /dev/null 2>&1\n"
-        )
+        probe_script = f"#!/bin/sh\ncqlsh {svc} < /scripts/run.cql > /dev/null 2>&1\n"
     return _workload_manifest(cluster_name, namespace, "cassandra:4.1", loop_cmd, reproducer, "run.cql", probe_script)
 
 
 # ── etcd helpers ─────────────────────────────────────────────────────────────
+
 
 def _etcd_image_patch(_cluster: str, _ns: str, image: str) -> dict:
     return {"spec": {"template": {"spec": {"containers": [{"name": "etcd", "image": image}]}}}}
@@ -795,6 +828,7 @@ def _etcd_image_patch(_cluster: str, _ns: str, image: str) -> dict:
 def _etcd_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> None:
     import logging
     import subprocess
+
     log = logging.getLogger(__name__)
     svc = f"{cluster_name}.{namespace}.svc.cluster.local"
     endpoint = f"http://{svc}:2379"
@@ -804,29 +838,37 @@ def _etcd_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> 
     try:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
         subprocess.run(
-            f"kubectl run {pod} --image=alpine:3.20 "
-            f"--restart=Never -n {namespace} "
-            f"-- sleep 3600",
-            shell=True, check=True, capture_output=True,
+            f"kubectl run {pod} --image=alpine:3.20 --restart=Never -n {namespace} -- sleep 3600",
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             f"kubectl wait pod/{pod} -n {namespace} --for=condition=Ready --timeout=120s",
-            shell=True, check=True, capture_output=True,
+            shell=True,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(
             f"kubectl exec {pod} -n {namespace} -- "
             "sh -c 'wget -qO /tmp/etcd.tgz https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz && "
             "tar xzf /tmp/etcd.tgz -C /tmp && cp /tmp/etcd-v3.5.17-linux-amd64/etcdctl /usr/local/bin/ && rm -rf /tmp/etcd*'",
-            shell=True, check=True, capture_output=True, timeout=120,
+            shell=True,
+            check=True,
+            capture_output=True,
+            timeout=120,
         )
         result = subprocess.run(
-            f"kubectl exec -i {pod} -n {namespace} -- "
-            f"sh -c 'export ETCDCTL_ENDPOINTS={endpoint}; sh'",
-            shell=True, input=reproducer,
-            capture_output=True, text=True, timeout=120,
+            f"kubectl exec -i {pod} -n {namespace} -- sh -c 'export ETCDCTL_ENDPOINTS={endpoint}; sh'",
+            shell=True,
+            input=reproducer,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         if result.returncode == 0:
             log.info(f"[Reproducer] Completed: {result.stdout.strip()[:200]}")
@@ -837,7 +879,8 @@ def _etcd_run_reproducer(cluster_name: str, namespace: str, reproducer: str) -> 
     finally:
         subprocess.run(
             f"kubectl delete pod {pod} -n {namespace} --ignore-not-found --wait=false",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
 
 
@@ -864,21 +907,18 @@ def _etcd_reproducer_workload(
     if expected_output:
         safe = expected_output.replace("'", "'\\''")
         probe_script = (
-            "#!/bin/sh\n"
-            "[ -f /tmp/repro.out ] || exit 1\n"
-            f"grep -qF '{safe}' /tmp/repro.out && exit 0\n"
-            "exit 1\n"
+            f"#!/bin/sh\n[ -f /tmp/repro.out ] || exit 1\ngrep -qF '{safe}' /tmp/repro.out && exit 0\nexit 1\n"
         )
     else:
-        probe_script = (
-            "#!/bin/sh\n"
-            "[ -f /tmp/probe_rc ] || exit 1\n"
-            '[ "$(cat /tmp/probe_rc)" = "0" ] && exit 0\n'
-            "exit 1\n"
-        )
+        probe_script = '#!/bin/sh\n[ -f /tmp/probe_rc ] || exit 1\n[ "$(cat /tmp/probe_rc)" = "0" ] && exit 0\nexit 1\n'
     return _workload_manifest(
-        cluster_name, namespace, "alpine:3.20",
-        loop_cmd, reproducer, "run.sh", probe_script,
+        cluster_name,
+        namespace,
+        "alpine:3.20",
+        loop_cmd,
+        reproducer,
+        "run.sh",
+        probe_script,
     )
 
 
@@ -891,10 +931,7 @@ DB_REGISTRY: dict[str, DBBuildSpec] = {
         github_repo="apache/cassandra",
         version_tag_pattern="cassandra-{version}",
         build_image="eclipse-temurin:11",
-        build_cmd=(
-            "apt-get update -qq && apt-get install -y -q ant && "
-            "ant jar -Duse.jdk11=true"
-        ),
+        build_cmd=("apt-get update -qq && apt-get install -y -q ant && ant jar -Duse.jdk11=true"),
         artifact_glob="build/apache-cassandra-*.jar",
         base_image="k8ssandra/cass-management-api:{version}-ubi8",
         artifact_dest="/opt/cassandra/lib/",
@@ -937,11 +974,7 @@ DB_REGISTRY: dict[str, DBBuildSpec] = {
         # chart v1.6.5 leaves compactbackups.pingcap.com missing, which stalls
         # the controller reconciliation loop and prevents any pods from starting.
         # Disable admission webhook and scheduler (both need cert infra on kind).
-        operator_extra_helm_args=(
-            "--version v1.6.0 "
-            "--set admissionWebhook.create=false "
-            "--set scheduler.create=false"
-        ),
+        operator_extra_helm_args=("--version v1.6.0 --set admissionWebhook.create=false --set scheduler.create=false"),
     ),
     "mongodb": DBBuildSpec(
         name="mongodb",

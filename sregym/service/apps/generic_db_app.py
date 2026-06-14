@@ -26,8 +26,12 @@ logger = logging.getLogger("all.application")
 
 def _run(cmd: str, input: str | None = None, check: bool = True) -> str:
     result = subprocess.run(
-        cmd, shell=True, check=False,
-        capture_output=True, text=True, input=input,
+        cmd,
+        shell=True,
+        check=False,
+        capture_output=True,
+        text=True,
+        input=input,
     )
     if result.stdout:
         logger.debug(result.stdout.strip())
@@ -89,17 +93,16 @@ class GenericDBApplication:
             return self.cluster_name
         return f"{self.spec.name}-operator"
 
-    def inject_buggy_image(self, image_tag: str):
-        """Patch the running cluster to use a custom-built (buggy) image.
+    def _roll_to_image(self, image_tag: str):
+        """Patch the running cluster to ``image_tag`` and wait for a Ready rollout.
 
-        First gives the operator a chance to propagate the CR change itself.
-        If the operator stalls (e.g. sets partition=1 or ignores spec.*.image),
-        falls back to scaling it down and patching StatefulSets directly.
-
-        For helm_deploy_chart DBs there is no CR — go straight to the direct
+        Shared by inject_buggy_image() (fault injection) and deploy_rebuilt_image()
+        (deploying an agent's recompiled fix) — the mechanism is identical: give the
+        operator a chance to propagate the CR change, fall back to scaling it down and
+        patching StatefulSets directly, then wait for pods to come up Ready on the new
+        image. For helm_deploy_chart DBs there is no CR — go straight to the direct
         StatefulSet patch path.
         """
-        logger.info(f"Swapping {self.spec.name} cluster to image: {image_tag}")
         if self.spec.helm_deploy_chart:
             self._operator_override(image_tag)
         else:
@@ -112,6 +115,31 @@ class GenericDBApplication:
         logger.info("Image patched — waiting for rolling restart")
         self._wait_for_image_rollout(image_tag)
         logger.info(f"Cluster ready with image: {image_tag}")
+
+    def inject_buggy_image(self, image_tag: str):
+        """Patch the running cluster to use a custom-built (buggy) image.
+
+        First gives the operator a chance to propagate the CR change itself.
+        If the operator stalls (e.g. sets partition=1 or ignores spec.*.image),
+        falls back to scaling it down and patching StatefulSets directly.
+
+        For helm_deploy_chart DBs there is no CR — go straight to the direct
+        StatefulSet patch path.
+        """
+        logger.info(f"Swapping {self.spec.name} cluster to buggy image: {image_tag}")
+        self._roll_to_image(image_tag)
+
+    def deploy_rebuilt_image(self, image_tag: str):
+        """Roll the running cluster to an agent-rebuilt image and wait for Ready.
+
+        Used by the generic ``/db/rebuild`` flow after an agent edits the source at
+        ``/opt/source`` and the build manager compiles a fixed binary. Mechanically
+        identical to inject_buggy_image() (operator CR patch with a direct
+        StatefulSet-patch fallback) but named for its intent so logs and call sites
+        are unambiguous.
+        """
+        logger.info(f"Deploying agent-rebuilt {self.spec.name} image: {image_tag}")
+        self._roll_to_image(image_tag)
 
     def restore_stock_image(self, custom_image: str | None = None):
         """Patch the cluster back to the stock image and wait for all pods to be Ready.
@@ -164,8 +192,7 @@ class GenericDBApplication:
         # No CR exists for helm_deploy_chart DBs — skip the kubectl delete.
         if not self.spec.helm_deploy_chart:
             _run(
-                f"kubectl delete {self.spec.cr_kind} {self.cluster_name} "
-                f"-n {self.namespace} --ignore-not-found",
+                f"kubectl delete {self.spec.cr_kind} {self.cluster_name} -n {self.namespace} --ignore-not-found",
                 check=False,
             )
 
@@ -181,17 +208,20 @@ class GenericDBApplication:
                 pv_name = line.split()[0]
                 subprocess.run(
                     f'kubectl patch pv {pv_name} -p \'{{"metadata":{{"finalizers":null}}}}\'',
-                    shell=True, check=False,
+                    shell=True,
+                    check=False,
                 )
                 subprocess.run(
                     f"kubectl delete pv {pv_name} --ignore-not-found",
-                    shell=True, check=False,
+                    shell=True,
+                    check=False,
                 )
 
         release = self._helm_release_name()
         subprocess.run(
             f"helm uninstall {release} -n {self.spec.operator_namespace} 2>/dev/null || true",
-            shell=True, check=False,
+            shell=True,
+            check=False,
         )
         self._delete_namespace(self.spec.operator_namespace)
         logger.info(f"{self.spec.name} cleanup complete")
@@ -212,7 +242,9 @@ class GenericDBApplication:
         """
         if not self.spec.run_reproducer_fn:
             raise RuntimeError(f"No run_reproducer_fn defined for {self.spec.name}")
-        import tempfile, os
+        import os
+        import tempfile
+
         # Write the reproducer to a temp file so the subprocess can read it
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".sql", delete=False)
         tmp.write(reproducer)
@@ -225,7 +257,9 @@ class GenericDBApplication:
         # We re-use run_reproducer_fn by running it in a thread so any DB-specific
         # logic (e.g. mongosh vs cockroach sql) is preserved.
         import threading
+
         result_holder = {}
+
         def _run_in_thread():
             try:
                 self.spec.run_reproducer_fn(self.cluster_name, self.namespace, reproducer)
@@ -247,11 +281,16 @@ class GenericDBApplication:
         """
         ns = self.namespace
         # Grab the app label from the pod before deleting it
-        label_out = subprocess.run(
-            f"kubectl get pod {pod_name} -n {ns} "
-            f"--no-headers -o jsonpath='{{.metadata.labels.app\\.kubernetes\\.io/instance}}'",
-            shell=True, capture_output=True, text=True,
-        ).stdout.strip() or self.cluster_name
+        label_out = (
+            subprocess.run(
+                f"kubectl get pod {pod_name} -n {ns} "
+                f"--no-headers -o jsonpath='{{.metadata.labels.app\\.kubernetes\\.io/instance}}'",
+                shell=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            or self.cluster_name
+        )
 
         logger.info(f"[{self.spec.name}] Killing pod {pod_name} in {ns}")
         _run(f"kubectl delete pod {pod_name} -n {ns} --grace-period=0 --force", check=False)
@@ -274,10 +313,9 @@ class GenericDBApplication:
         )
         pods = [p.strip() for p in out.splitlines() if p.strip()]
         if not pods:
-            raise RuntimeError(
-                f"No pods found for cluster {self.cluster_name!r} in {self.namespace!r}"
-            )
+            raise RuntimeError(f"No pods found for cluster {self.cluster_name!r} in {self.namespace!r}")
         import random
+
         victim = random.choice(pods)
         logger.info(f"[{self.spec.name}] Randomly selected pod to kill: {victim}")
         self.kill_pod(victim, wait=wait)
@@ -314,7 +352,9 @@ class GenericDBApplication:
         release = self._helm_release_name()
         existing = subprocess.run(
             f"helm status {release} -n {self.spec.operator_namespace}",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         if existing.returncode == 0:
             if "deployed" in existing.stdout:
@@ -323,7 +363,8 @@ class GenericDBApplication:
             if "failed" in existing.stdout:
                 subprocess.run(
                     f"helm uninstall {release} -n {self.spec.operator_namespace}",
-                    shell=True, check=False,
+                    shell=True,
+                    check=False,
                 )
 
         # Chart-only DBs (helm_deploy_chart) drop the operator-flavoured flags
@@ -343,14 +384,10 @@ class GenericDBApplication:
             parts = image_repo.split("/", 1)
             if len(parts) == 2 and "." in parts[0]:
                 image_flags = (
-                    f"--set image.registry={parts[0]} "
-                    f"--set image.repository={parts[1]} "
-                    f"--set image.tag={image_tag} "
+                    f"--set image.registry={parts[0]} --set image.repository={parts[1]} --set image.tag={image_tag} "
                 )
             else:
-                image_flags = (
-                    f"--set image.repository={image_repo} --set image.tag={image_tag} "
-                )
+                image_flags = f"--set image.repository={image_repo} --set image.tag={image_tag} "
             # No --wait for helm_deploy_chart: the cockroachdb chart ships a
             # separate ``cockroach init`` Job that bootstraps the cluster, and
             # the StatefulSet can't pass its readiness probe until that Job
@@ -389,13 +426,8 @@ class GenericDBApplication:
         logger.info(f"{self.spec.name} operator ready")
 
     def _deploy_cluster(self, custom_image: str | None):
-        _run(
-            f"kubectl create namespace {self.namespace} "
-            f"--dry-run=client -o yaml | kubectl apply -f -"
-        )
-        manifest = self.spec.cluster_manifest_fn(
-            self.cluster_name, self.namespace, self.version, custom_image
-        )
+        _run(f"kubectl create namespace {self.namespace} --dry-run=client -o yaml | kubectl apply -f -")
+        manifest = self.spec.cluster_manifest_fn(self.cluster_name, self.namespace, self.version, custom_image)
         _run("kubectl apply -f -", input=manifest)
         logger.info(f"{self.spec.name} cluster CR applied to '{self.namespace}'")
 
@@ -425,10 +457,7 @@ class GenericDBApplication:
         # Completed/Failed — e.g. cockroachdb's cluster-init Job.  They can
         # never pass condition=Ready, which would otherwise stall this loop.
         field_sel = "status.phase!=Succeeded,status.phase!=Failed"
-        logger.info(
-            f"Waiting for cluster '{self.cluster_name}' pods "
-            f"(label: {label}) to be Ready (up to {timeout}s)…"
-        )
+        logger.info(f"Waiting for cluster '{self.cluster_name}' pods (label: {label}) to be Ready (up to {timeout}s)…")
         deadline = time.time() + timeout
         last_count = 0
         stable_and_ready = 0
@@ -437,7 +466,9 @@ class GenericDBApplication:
             out = subprocess.run(
                 f"kubectl get pods -n {self.namespace} -l '{label}' "
                 f"--field-selector='{field_sel}' --no-headers 2>/dev/null",
-                shell=True, capture_output=True, text=True,
+                shell=True,
+                capture_output=True,
+                text=True,
             )
             pods = [l for l in out.stdout.strip().splitlines() if l]
             count = len(pods)
@@ -447,7 +478,9 @@ class GenericDBApplication:
                     f"kubectl wait pods -n {self.namespace} -l '{label}' "
                     f"--field-selector='{field_sel}' "
                     f"--for=condition=Ready --timeout=5s",
-                    shell=True, capture_output=True, text=True,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
                 )
                 if r.returncode == 0:
                     stable_and_ready += 1
@@ -463,8 +496,7 @@ class GenericDBApplication:
             time.sleep(15)
 
         raise RuntimeError(
-            f"Timeout ({timeout}s) waiting for cluster '{self.cluster_name}' "
-            f"pods to be Ready in '{self.namespace}'"
+            f"Timeout ({timeout}s) waiting for cluster '{self.cluster_name}' pods to be Ready in '{self.namespace}'"
         )
 
     def _scale_operator_up(self):
@@ -472,13 +504,16 @@ class GenericDBApplication:
         deps_out = subprocess.run(
             f"kubectl get deployments -n {self.spec.operator_namespace} "
             f"--no-headers -o jsonpath='{{range .items[*]}}{{.metadata.name}} {{end}}' 2>/dev/null",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         for dep in deps_out.stdout.strip().split():
             logger.info(f"[GenericDBApp] Scaling up operator deployment '{dep}'")
             subprocess.run(
                 f"kubectl scale deployment {dep} -n {self.spec.operator_namespace} --replicas=1",
-                shell=True, capture_output=True,
+                shell=True,
+                capture_output=True,
             )
 
     def _wait_for_image_rollout(self, image_tag: str, timeout: int = 600, from_image: str | None = None):
@@ -494,10 +529,7 @@ class GenericDBApplication:
                image_tag (identified by resolved_base_image from the spec).
         This fallback is operator-agnostic: it uses no hardcoded names.
         """
-        logger.info(
-            f"Waiting for rolling update to image '{image_tag}' "
-            f"in '{self.namespace}' (up to {timeout}s)…"
-        )
+        logger.info(f"Waiting for rolling update to image '{image_tag}' in '{self.namespace}' (up to {timeout}s)…")
         override_attempted = False
         deadline = time.time() + timeout
         operator_wait = time.time() + 30  # grace period before override
@@ -507,28 +539,23 @@ class GenericDBApplication:
                 pod_name = self._find_pod_with_image(image_tag)
                 if pod_name:
                     ready_r = subprocess.run(
-                        f"kubectl wait pod/{pod_name} -n {self.namespace} "
-                        f"--for=condition=Ready --timeout=5s",
-                        shell=True, capture_output=True, text=True,
+                        f"kubectl wait pod/{pod_name} -n {self.namespace} --for=condition=Ready --timeout=5s",
+                        shell=True,
+                        capture_output=True,
+                        text=True,
                     )
                     if ready_r.returncode == 0:
                         logger.info(f"Pod '{pod_name}' is Ready with image '{image_tag}'")
                         return
 
             if not override_attempted and time.time() > operator_wait:
-                logger.info(
-                    "Operator did not propagate image change — "
-                    "falling back to direct StatefulSet override"
-                )
+                logger.info("Operator did not propagate image change — falling back to direct StatefulSet override")
                 self._operator_override(image_tag, from_image=from_image)
                 override_attempted = True
 
             time.sleep(15)
 
-        raise RuntimeError(
-            f"Timeout ({timeout}s) waiting for image '{image_tag}' "
-            f"to roll out in '{self.namespace}'"
-        )
+        raise RuntimeError(f"Timeout ({timeout}s) waiting for image '{image_tag}' to roll out in '{self.namespace}'")
 
     def _wait_for_crash_loop(self, image_tag: str, timeout: int = 300):
         """Wait until a pod running image_tag enters CrashLoopBackOff or exits non-zero.
@@ -537,10 +564,8 @@ class GenericDBApplication:
         the new image actually reaches pods even when the operator stalls.
         """
         import json as _json
-        logger.info(
-            f"Waiting for crash-loop on image '{image_tag}' "
-            f"in '{self.namespace}' (up to {timeout}s)…"
-        )
+
+        logger.info(f"Waiting for crash-loop on image '{image_tag}' in '{self.namespace}' (up to {timeout}s)…")
         override_attempted = False
         deadline = time.time() + timeout
         operator_wait = time.time() + 30
@@ -549,7 +574,9 @@ class GenericDBApplication:
             if self._any_pod_has_image(image_tag):
                 out = subprocess.run(
                     f"kubectl get pods -n {self.namespace} -o json 2>/dev/null",
-                    shell=True, capture_output=True, text=True,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
                 )
                 try:
                     data = _json.loads(out.stdout)
@@ -572,26 +599,22 @@ class GenericDBApplication:
                     pass
 
             if not override_attempted and time.time() > operator_wait:
-                logger.info(
-                    "Operator did not propagate image change — "
-                    "falling back to direct StatefulSet override"
-                )
+                logger.info("Operator did not propagate image change — falling back to direct StatefulSet override")
                 self._operator_override(image_tag)
                 override_attempted = True
 
             time.sleep(10)
 
-        raise RuntimeError(
-            f"Timeout ({timeout}s) waiting for crash-loop on image '{image_tag}' "
-            f"in '{self.namespace}'"
-        )
+        raise RuntimeError(f"Timeout ({timeout}s) waiting for crash-loop on image '{image_tag}' in '{self.namespace}'")
 
     def _any_pod_has_image(self, image_tag: str) -> bool:
         out = subprocess.run(
             f"kubectl get pods -n {self.namespace} "
             f"-o jsonpath='{{range .items[*]}}{{range .spec.containers[*]}}{{.image}} {{end}}{{end}}' "
             f"2>/dev/null",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         return image_tag in out.stdout
 
@@ -599,13 +622,17 @@ class GenericDBApplication:
         names_out = subprocess.run(
             f"kubectl get pods -n {self.namespace} --no-headers "
             f"-o jsonpath='{{range .items[*]}}{{.metadata.name}} {{end}}' 2>/dev/null",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         for pod_name in names_out.stdout.strip().split():
             img_out = subprocess.run(
                 f"kubectl get pod {pod_name} -n {self.namespace} "
                 f"-o jsonpath='{{range .spec.containers[*]}}{{.image}} {{end}}' 2>/dev/null",
-                shell=True, capture_output=True, text=True,
+                shell=True,
+                capture_output=True,
+                text=True,
             )
             if image_tag in img_out.stdout:
                 return pod_name
@@ -621,13 +648,16 @@ class GenericDBApplication:
         deps_out = subprocess.run(
             f"kubectl get deployments -n {self.spec.operator_namespace} "
             f"--no-headers -o jsonpath='{{range .items[*]}}{{.metadata.name}} {{end}}' 2>/dev/null",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         for dep in deps_out.stdout.strip().split():
             logger.info(f"Scaling down operator deployment '{dep}'")
             subprocess.run(
                 f"kubectl scale deployment {dep} -n {self.spec.operator_namespace} --replicas=0",
-                shell=True, capture_output=True,
+                shell=True,
+                capture_output=True,
             )
         time.sleep(5)
 
@@ -635,7 +665,9 @@ class GenericDBApplication:
         sts_out = subprocess.run(
             f"kubectl get statefulsets -n {self.namespace} --no-headers "
             f"-o jsonpath='{{range .items[*]}}{{.metadata.name}} {{end}}' 2>/dev/null",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         for sts in sts_out.stdout.strip().split():
             self._patch_statefulset(sts, match_image, image_tag)
@@ -650,7 +682,9 @@ class GenericDBApplication:
             f"kubectl get statefulset {sts_name} -n {self.namespace} "
             f"-o jsonpath='{{range .spec.template.spec.containers[*]}}{{.name}} {{.image}}|{{end}}' "
             f"2>/dev/null",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         containers_to_patch = []
         for entry in ctrs_out.stdout.strip().split("|"):
@@ -674,18 +708,18 @@ class GenericDBApplication:
             patch["spec"]["template"] = {"spec": {"containers": containers_to_patch}}  # type: ignore[index]
 
         logger.info(
-            f"Patching StatefulSet '{sts_name}': "
-            f"partition=0, containers={[c['name'] for c in containers_to_patch]}"
+            f"Patching StatefulSet '{sts_name}': partition=0, containers={[c['name'] for c in containers_to_patch]}"
         )
         subprocess.run(
-            f"kubectl patch statefulset {sts_name} -n {self.namespace} "
-            f"--type=strategic -p '{json.dumps(patch)}'",
-            shell=True, check=True,
+            f"kubectl patch statefulset {sts_name} -n {self.namespace} --type=strategic -p '{json.dumps(patch)}'",
+            shell=True,
+            check=True,
         )
 
     @staticmethod
     def _delete_namespace(namespace: str):
         subprocess.run(
             f"kubectl delete namespace {namespace} --ignore-not-found",
-            shell=True, check=False,
+            shell=True,
+            check=False,
         )

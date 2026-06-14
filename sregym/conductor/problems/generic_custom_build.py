@@ -59,6 +59,7 @@ def _nearest_released_version(spec, version: str) -> str:
     a pre-release that hasn't been tagged yet.
     """
     import subprocess as _sp
+
     candidate = spec.resolved_base_image(version)
     ok = _sp.run(f"docker manifest inspect {candidate}", shell=True, capture_output=True)
     if ok.returncode == 0:
@@ -68,16 +69,12 @@ def _nearest_released_version(spec, version: str) -> str:
     # repo. Works for cockroachdb/cockroach, pingcap/tidb,
     # k8ssandra/cass-management-api, mongodb/mongodb-community-server, etc.
     repo = spec.base_image.split(":", 1)[0]
-    logger.warning(
-        f"[GenericCustomBuild] {candidate!r} not on Docker Hub — "
-        f"querying {repo!r} tags for nearest match"
-    )
+    logger.warning(f"[GenericCustomBuild] {candidate!r} not on Docker Hub — querying {repo!r} tags for nearest match")
     try:
-        import urllib.request as _ur, json as _js
-        url = (
-            f"https://registry.hub.docker.com/v2/repositories/{repo}"
-            f"/tags?page_size=100&ordering=last_updated"
-        )
+        import json as _js
+        import urllib.request as _ur
+
+        url = f"https://registry.hub.docker.com/v2/repositories/{repo}/tags?page_size=100&ordering=last_updated"
         with _ur.urlopen(url, timeout=10) as r:
             tags = [t["name"] for t in _js.loads(r.read())["results"]]
     except Exception as e:
@@ -106,8 +103,7 @@ def _nearest_released_version(spec, version: str) -> str:
         if same_minor:
             resolved = same_minor[0]
             logger.info(
-                f"[GenericCustomBuild] Resolved {version!r} → {resolved!r} "
-                f"(newest same-minor release on {repo})"
+                f"[GenericCustomBuild] Resolved {version!r} → {resolved!r} (newest same-minor release on {repo})"
             )
             return resolved
 
@@ -137,7 +133,7 @@ def _version_from_source(source_path: Path, spec) -> str | None:
         m = re.search(r'[Rr]elease[Vv]ersion\s*=\s*"v?(\d+\.\d+\.\d+)', text)
         if m:
             return m.group(1)
-        m = re.search(r'<version>(\d+\.\d+\.\d+)', text)
+        m = re.search(r"<version>(\d+\.\d+\.\d+)", text)
         if m:
             return m.group(1)
         # MongoDB: mongo_version.py — version = "7.0.5"
@@ -155,14 +151,14 @@ class GenericCustomBuildProblem(Problem):
     """
 
     # ── Required ─────────────────────────────────────────────────────────────
-    db_name: str   # key into DB_REGISTRY, e.g. "cassandra"
+    db_name: str  # key into DB_REGISTRY, e.g. "cassandra"
 
     # ── Auto mode (issue-driven) ──────────────────────────────────────────────
     issue_url: str | None = None
 
     # ── Hand-crafted mode (patch-driven) ─────────────────────────────────────
-    db_version: str | None = None        # e.g. "4.1.7"
-    source_git_ref: str | None = None    # e.g. "cassandra-4.1.7"
+    db_version: str | None = None  # e.g. "4.1.7"
+    source_git_ref: str | None = None  # e.g. "cassandra-4.1.7"
     patch_dir: Path | None = None
 
     # ── Optional overrides ────────────────────────────────────────────────────
@@ -199,15 +195,18 @@ class GenericCustomBuildProblem(Problem):
     # i.e. buggy version = fix patch - 1). Overrides DBBuildSpec.prebuilt_from_stock
     # for this problem only. Leave None to inherit the spec default.
     prebuilt_from_stock: bool | None = None
+    # When True, the agent may edit the source tree at /opt/source and call the
+    # /db/rebuild tool to recompile and redeploy its fix. Only enable for problems
+    # whose database compiles from source (the DBBuildSpec has a real build_cmd /
+    # artifact_glob / artifact_dest); leave False for prebuilt_from_stock bugs that
+    # cannot be compiled standalone.
+    allows_rebuild: bool = False
 
     # ── Init ─────────────────────────────────────────────────────────────────
 
     def __init__(self):
         if self.db_name not in DB_REGISTRY:
-            raise ValueError(
-                f"Unknown db_name '{self.db_name}'. "
-                f"Add an entry to DB_REGISTRY in db_build_spec.py."
-            )
+            raise ValueError(f"Unknown db_name '{self.db_name}'. Add an entry to DB_REGISTRY in db_build_spec.py.")
         spec: DBBuildSpec = DB_REGISTRY[self.db_name]
 
         overrides = {}
@@ -228,7 +227,7 @@ class GenericCustomBuildProblem(Problem):
             name=spec.name,
         )
 
-        _major = int(version.split(".")[0]) if re.match(r'^\d', version) else 0
+        _major = int(version.split(".")[0]) if re.match(r"^\d", version) else 0
         if version == "unknown" or _major == 0:
             version = _version_from_source(source_path, spec) or version
             logger.info(f"[GenericCustomBuild] Resolved version from source tree: {version}")
@@ -239,8 +238,7 @@ class GenericCustomBuildProblem(Problem):
         deploy_version = _nearest_released_version(spec, version)
         if deploy_version != version:
             logger.info(
-                f"[GenericCustomBuild] {version!r} has no Docker image — "
-                f"deploying stock cluster at {deploy_version!r}"
+                f"[GenericCustomBuild] {version!r} has no Docker image — deploying stock cluster at {deploy_version!r}"
             )
 
         # Build manager uses its version to pull the stock base image — must be
@@ -264,20 +262,28 @@ class GenericCustomBuildProblem(Problem):
             self._predeployed_buggy = deploy_version != version
             initial_image = self._custom_image if self._predeployed_buggy else None
         app = GenericDBApplication(
-            spec, deploy_version,
+            spec,
+            deploy_version,
             initial_image=initial_image,
             extra_helm_args=self.extra_helm_args,
         )
 
         _original_deploy = app.deploy
+
         def _wrapped_deploy():
             _original_deploy()
             self.post_deploy()
+
         app.deploy = _wrapped_deploy
 
         super().__init__(app=app, namespace=app.namespace)
 
-        self.source_code_path = source_path
+        # Export a git-free, identity-scrubbed copy for the agent mount. The raw
+        # clone (with .git + upstream remote) is never mounted, so the agent cannot
+        # recover the upstream fix via git. For the patch path the buggy patches are
+        # already applied to the clone above, so the export captures the buggy state
+        # with no recoverable git diff. Re-exporting each run resets prior edits.
+        self.source_code_path = SourceManager().export_clean_copy(source_path)
 
         root_cause = self.build_structured_root_cause(
             component=f"source/{self.root_cause_file}",
@@ -344,8 +350,7 @@ class GenericCustomBuildProblem(Problem):
             logger.info("[GenericCustomBuild] Buggy image already deployed at cluster start — skipping swap")
         else:
             logger.info(
-                f"[GenericCustomBuild] Injecting fault: swapping {self.db_name} "
-                f"cluster to {self._custom_image}"
+                f"[GenericCustomBuild] Injecting fault: swapping {self.db_name} cluster to {self._custom_image}"
             )
             self.app.inject_buggy_image(self._custom_image)
             logger.info("[GenericCustomBuild] Buggy image active")
@@ -373,9 +378,7 @@ class GenericCustomBuildProblem(Problem):
         if self.issue_url:
             parsed = parse_issue(self.issue_url)
             if not self.root_cause_description and parsed.body:
-                self.root_cause_description = (
-                    f"{parsed.title}\n\n{parsed.body[:1000]}"
-                ).strip()
+                self.root_cause_description = (f"{parsed.title}\n\n{parsed.body[:1000]}").strip()
             if not self.reproducer and parsed.reproducer:
                 self.reproducer = parsed.reproducer
             if not self.expected_output and parsed.expected_output:

@@ -26,6 +26,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from sregym.service.identity import opaque_build_tag
+
 logger = logging.getLogger(__name__)
 
 # K8ssandra management API base image — Cassandra lives inside this image
@@ -62,8 +64,7 @@ class CassandraBuildManager:
             raise FileNotFoundError(f"Java source root not found: {java_root}")
 
         source_hash = self._hash_dir(java_root)
-        versioned = hashlib.sha256(f"{_DOCKERFILE_VERSION}:{source_hash}".encode()).hexdigest()
-        image_tag = f"sregym/cassandra-patched:{self.cassandra_version}-{versioned[:8]}"
+        image_tag = opaque_build_tag("cassandra", self.cassandra_version, source_hash, _DOCKERFILE_VERSION)
 
         if self._image_exists_locally(image_tag):
             logger.info(f"[BuildMgr] Cached image {image_tag} found — skipping build")
@@ -96,8 +97,7 @@ class CassandraBuildManager:
         self._apply_patches(patch_dir)
 
         patch_hash = self._hash_dir(patch_dir)
-        versioned = hashlib.sha256(f"{_DOCKERFILE_VERSION}:{patch_hash}".encode()).hexdigest()
-        image_tag = f"sregym/cassandra-patched:{self.cassandra_version}-{versioned[:8]}"
+        image_tag = opaque_build_tag("cassandra", self.cassandra_version, patch_hash, _DOCKERFILE_VERSION)
 
         if self._image_exists_locally(image_tag):
             logger.info(f"[BuildMgr] Cached image {image_tag} found — skipping build")

@@ -37,14 +37,119 @@ HIDDEN_NAMESPACES: set[str] = {"chaos-mesh", "khaos"}
 
 # Labels to hide from agents - resources matching any of these label key/value pairs are hidden.
 # Load generators produce synthetic traffic and should not be visible to agents.
+# ``sregym.io/internal`` marks benchmark scaffolding (e.g. the continuous reproducer
+# that the mitigation oracle reads) — agents must not see OR mutate it, otherwise they
+# could fake a fix by tampering with the grading signal instead of repairing the bug.
 HIDDEN_LABELS: dict[str, set[str]] = {
     "app": {"load-generator", "locust-fetcher"},
     "job": {"workload"},
     "opentelemetry.io/name": {"load-generator"},
+    "sregym.io/internal": {"true"},
 }
 
 # Disable SSL warnings for self-signed certs
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def metadata_has_hidden_label(metadata: dict, hidden_labels: dict[str, set[str]]) -> bool:
+    """Return True if the resource metadata carries any configured hidden label."""
+    labels = (metadata or {}).get("labels") or {}
+    return any(labels.get(key) in values for key, values in hidden_labels.items())
+
+
+def named_resource_get_path(path: str) -> str | None:
+    """Return the GET path of the single named namespaced resource a request targets.
+
+    The query string and any trailing subresource (e.g. ``/scale``, ``/status``) are
+    stripped so the caller can fetch the parent object. Returns None when the path is
+    not a single named namespaced resource (collections, the namespace object itself,
+    or cluster-scoped paths), in which case no by-name mutation guard applies.
+    """
+    clean = path.split("?", 1)[0]
+    parts = [p for p in clean.split("/") if p]
+    if "namespaces" not in parts:
+        return None
+    i = parts.index("namespaces")
+    # Need namespaces/{ns}/{resource}/{name}; anything after {name} is a subresource.
+    if len(parts) < i + 4:
+        return None
+    return "/" + "/".join(parts[: i + 4])
+
+
+def is_namespaced_collection(path: str) -> bool:
+    """Return True if the path is a namespaced *collection* (list) request, e.g.
+    ``/api/v1/namespaces/<ns>/configmaps`` or
+    ``/apis/apps/v1/namespaces/<ns>/deployments`` (optionally with a query string),
+    as opposed to a single named resource, a subresource, or the namespace object.
+
+    kubectl's default Table output for a namespaced list must still have hidden rows
+    stripped; ``_should_filter_response`` only recognises cluster-wide collections, so
+    this covers the namespaced case so hidden scaffolding never appears in a list.
+    """
+    clean = path.split("?", 1)[0]
+    parts = [p for p in clean.split("/") if p]
+    if "namespaces" not in parts:
+        return False
+    i = parts.index("namespaces")
+    # namespaces/<ns>/<resource> exactly: namespace + resource type, no trailing name.
+    return len(parts) == i + 3
+
+
+def payload_targets_hidden(data: dict, hidden_labels: dict[str, set[str]]) -> bool:
+    """Return True if a single-resource response body refers to a hidden resource.
+
+    Covers both the raw object form (``metadata.labels`` at the top level) and
+    kubectl's default Table form, where the real object is nested under
+    ``rows[].object.metadata`` and the top-level metadata is only the table's own —
+    so a by-name ``kubectl get`` of hidden scaffolding cannot slip through unblocked.
+    """
+    if not isinstance(data, dict):
+        return False
+    if metadata_has_hidden_label(data.get("metadata", {}), hidden_labels):
+        return True
+    for row in data.get("rows", []) or []:
+        if not isinstance(row, dict):
+            continue
+        obj = row.get("object", {}) or {}
+        if metadata_has_hidden_label(obj.get("metadata", {}), hidden_labels):
+            return True
+    return False
+
+
+def mutation_forbidden(
+    method: str,
+    path: str,
+    body: bytes | None,
+    hidden_labels: dict[str, set[str]],
+    fetch_metadata,
+) -> bool:
+    """Decide whether a mutating request targets a hidden (benchmark-internal) resource.
+
+    ``fetch_metadata(get_path) -> metadata dict | None`` injects the upstream GET so this
+    decision stays pure and unit-testable. For create (POST) the request body's own labels
+    are inspected; for PUT/PATCH/DELETE the target is fetched by name and its labels checked.
+    On a fetch failure (None) the mutation is allowed (fail-open) so legitimate traffic is
+    never wedged — the real scaffolding always exists and is fetchable, so the guard holds.
+    """
+    if method not in ("PUT", "PATCH", "DELETE", "POST"):
+        return False
+    # Disallow creating a resource that carries a hidden label.
+    if method == "POST":
+        if not body:
+            return False
+        try:
+            obj = json.loads(body)
+        except Exception:
+            return False
+        return isinstance(obj, dict) and metadata_has_hidden_label(obj.get("metadata", {}), hidden_labels)
+    # PUT/PATCH/DELETE: pre-flight fetch the target and check its labels.
+    get_path = named_resource_get_path(path)
+    if not get_path:
+        return False
+    meta = fetch_metadata(get_path)
+    if meta is None:
+        return False
+    return metadata_has_hidden_label(meta, hidden_labels)
 
 
 class KubernetesAPIProxy:
@@ -59,10 +164,18 @@ class KubernetesAPIProxy:
         hidden_namespaces: set[str] | None = None,
         hidden_labels: dict[str, set[str]] | None = None,
         listen_port: int = 6443,
+        listen_host: str | None = None,
     ):
         self.hidden_namespaces: set[str] = hidden_namespaces if hidden_namespaces is not None else HIDDEN_NAMESPACES
         self.hidden_labels: dict[str, set[str]] = hidden_labels if hidden_labels is not None else HIDDEN_LABELS
         self.listen_port = listen_port
+        # Bind 127.0.0.1 by default. In restricted egress mode the agent is on a
+        # bridge network and reaches the proxy via the host gateway, so bind all
+        # interfaces so host.docker.internal resolves to a listening socket.
+        if listen_host is None:
+            restricted = os.environ.get("SREGYM_AGENT_EGRESS", "").strip().lower() == "restricted"
+            listen_host = "0.0.0.0" if restricted else "127.0.0.1"
+        self.listen_host = listen_host
         self.server: HTTPServer | None = None
         self.server_thread: threading.Thread | None = None
         self._temp_files: list = []
@@ -239,8 +352,54 @@ class KubernetesAPIProxy:
 
             def _has_hidden_label(self, metadata: dict) -> bool:
                 """Check if a resource's metadata contains any hidden labels."""
-                labels = metadata.get("labels") or {}
-                return any(labels.get(key) in values for key, values in hidden_labels.items())
+                return metadata_has_hidden_label(metadata, hidden_labels)
+
+            def _named_resource_get_path(self, path: str) -> str | None:
+                """Return the GET path of the single named namespaced resource a request
+                targets — query string and any subresource (e.g. ``/scale``, ``/status``)
+                stripped — or None if the path is not a single named namespaced resource.
+                """
+                return named_resource_get_path(path)
+
+            def _is_namespaced_collection(self, path: str) -> bool:
+                """Whether the path is a namespaced list (collection) request."""
+                return is_namespaced_collection(path)
+
+            def _payload_targets_hidden(self, data: dict) -> bool:
+                """Whether a single-resource body (raw object or Table) is hidden."""
+                return payload_targets_hidden(data, hidden_labels)
+
+            def _upstream_metadata(self, get_path: str) -> dict | None:
+                """GET a resource from upstream and return its metadata dict (or None)."""
+                try:
+                    conn = self._get_upstream_connection()
+                    headers = {"Accept": "application/json"}
+                    if bearer_token:
+                        headers["Authorization"] = f"Bearer {bearer_token}"
+                    conn.request("GET", get_path, headers=headers)
+                    resp = conn.getresponse()
+                    raw = resp.read()
+                    enc = resp.getheader("Content-Encoding", "")
+                    conn.close()
+                    if resp.status != 200:
+                        return None
+                    if enc == "gzip":
+                        import gzip
+
+                        raw = gzip.decompress(raw)
+                    obj = json.loads(raw)
+                    return obj.get("metadata", {}) if isinstance(obj, dict) else None
+                except Exception as e:
+                    logger.debug(f"Proxy pre-flight GET failed for {get_path}: {e}")
+                    return None
+
+            def _mutation_forbidden(self, method: str, path: str, body: bytes | None) -> bool:
+                """Block mutating verbs that target hidden (benchmark-internal) resources,
+                even when addressed directly by name — so agents cannot tamper with the
+                grading scaffolding (e.g. scale/patch/delete the continuous reproducer the
+                mitigation oracle reads) to fake a fix instead of repairing the bug.
+                """
+                return mutation_forbidden(method, path, body, hidden_labels, self._upstream_metadata)
 
             def _filter_resource_list(self, data: dict) -> dict:
                 """Filter resources in hidden namespaces or with hidden labels from list responses."""
@@ -309,6 +468,12 @@ class KubernetesAPIProxy:
                 content_length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(content_length) if content_length > 0 else None
 
+                # Block mutations that target hidden benchmark scaffolding (anti reward-hacking):
+                # agents must not patch/scale/delete the grading reproducer or load generators.
+                if self._mutation_forbidden(method, path, body):
+                    self.send_error(403, "Forbidden: This resource cannot be modified")
+                    return
+
                 # Forward request to upstream
                 try:
                     conn = self._get_upstream_connection()
@@ -336,19 +501,25 @@ class KubernetesAPIProxy:
                     if response.status == 200 and "application/json" in content_type:
                         try:
                             data = json.loads(response_body)
+                        except json.JSONDecodeError:
+                            data = None  # Not valid JSON, pass through as-is
+                        if isinstance(data, dict):
                             if filter_type == "namespaces":
                                 data = self._filter_namespace_list(data)
                                 response_body = json.dumps(data).encode()
-                            elif filter_type == "resources":
+                            elif filter_type == "resources" or self._is_namespaced_collection(path):
+                                # Collection (cluster-wide or namespaced) — strip hidden
+                                # items/rows so hidden scaffolding never appears in lists,
+                                # including kubectl's default Table output.
                                 data = self._filter_resource_list(data)
                                 response_body = json.dumps(data).encode()
-                            elif filter_type is None and self._has_hidden_label(data.get("metadata", {})):
-                                # Block direct access to individual hidden resources
+                            elif self._payload_targets_hidden(data):
+                                # Single named resource (raw object or Table get-by-name) —
+                                # block direct access so hidden scaffolding cannot be read
+                                # by name (kubectl's default Table nests it under rows[]).
                                 self.send_error(403, "Forbidden: Access to this resource is not allowed")
                                 conn.close()
                                 return
-                        except json.JSONDecodeError:
-                            pass  # Not valid JSON, pass through as-is
 
                     # Send response to client
                     self.send_response(response.status)
@@ -391,10 +562,10 @@ class KubernetesAPIProxy:
                 self._proxy_request("HEAD")
 
         # Create and start server
-        self.server = HTTPServer(("127.0.0.1", self.listen_port), FilteringProxyHandler)
+        self.server = HTTPServer((self.listen_host, self.listen_port), FilteringProxyHandler)
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
-        logger.info(f"Kubernetes API filtering proxy started on port {self.listen_port}")
+        logger.info(f"Kubernetes API filtering proxy started on {self.listen_host}:{self.listen_port}")
         logger.info(f"Hidden namespaces: {self.hidden_namespaces}")
         logger.info(f"Hidden labels: {self.hidden_labels}")
 

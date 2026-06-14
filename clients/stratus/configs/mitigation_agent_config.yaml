@@ -99,23 +99,21 @@ async_tools:
 
           Args:
               ans (str): the answer you would like to submit to the benchmark
-  # Cassandra rebuild tools for code-level bug fixing
-  - name: rebuild_cassandra
+  # Source rebuild tools for code-level bug fixing (database-agnostic)
+  - name: rebuild_database
     description: |
-      Rebuild Cassandra from modified source code. After editing files under /opt/source,
-          call this tool to recompile and redeploy. Takes ~12-15 minutes total:
-          - Compile with 'ant jar' (~5 minutes)
-          - Build Docker image
-          - Rolling restart cluster (~7 minutes)
+      Recompile the application from the source code you edited under /opt/source and roll the
+      cluster to the new build. Call this after editing source files to fix a code-level bug.
+          A full rebuild can take ~12-15 minutes (compile, image build, rolling restart).
 
           Args: None
 
           Returns: {"status": "deployed", "image": "<tag>"} on success
   - name: rebuild_status
     description: |
-      Check if Cassandra rebuild is available for this problem.
+      Check whether source rebuild is enabled for the current problem.
 
           Args: None
 
-          Returns: {"ready": bool, "allows_rebuild": bool, "has_source": bool, "has_cassandra": bool}
+          Returns: {"ready": bool, "allows_rebuild": bool, "has_source": bool, "buildable": bool}
 prompts_path: mitigation_agent_prompts.yaml

@@ -152,7 +152,11 @@ class CassandraOomRead(CassandraCustomBuildProblem):
         # Attach code fix verification oracle for mitigation stage
         self.mitigation_oracle = CodeFixMitigationOracle(
             problem=self,
-            error_patterns=["OutOfMemoryError", "queryDiagnosticBuffer size:"],
+            # Match the thrown exception (java.lang.OutOfMemoryError), not the bare
+            # substring "OutOfMemoryError": every healthy Cassandra startup logs JVM
+            # flags such as -XX:+HeapDumpOnOutOfMemoryError / -XX:OnOutOfMemoryError=,
+            # which would false-trip a substring match even after a correct fix.
+            error_patterns=["java.lang.OutOfMemoryError", "queryDiagnosticBuffer size:"],
             stability_window=120,  # Wait 2 minutes to ensure fix is stable
         )
 

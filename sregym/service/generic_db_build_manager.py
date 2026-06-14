@@ -22,6 +22,7 @@ import tempfile
 from pathlib import Path
 
 from sregym.service.db_build_spec import DBBuildSpec
+from sregym.service.identity import opaque_build_tag
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +52,7 @@ class GenericDBBuildManager:
             return image_tag
 
         if self.spec.prebuilt_from_stock:
-            logger.info(
-                f"[GenericBuildMgr] prebuilt_from_stock — tagging stock base as {image_tag}"
-            )
+            logger.info(f"[GenericBuildMgr] prebuilt_from_stock — tagging stock base as {image_tag}")
             self._build_prebuilt_image(image_tag)
             self._load_into_cluster(image_tag)
             return image_tag
@@ -104,6 +103,7 @@ class GenericDBBuildManager:
     def _resolve_build_image(self) -> str:
         """For Go-based builds, detect the required Go version from go.mod."""
         import re
+
         if not self.spec.build_image.startswith("golang:"):
             return self.spec.build_image
         go_mod = self.source_path / "go.mod"
@@ -121,11 +121,13 @@ class GenericDBBuildManager:
         # Fall back to -bookworm if -bullseye doesn't exist for this Go version.
         if not any(s in detected for s in ("-bullseye", "-bookworm", "-alpine", "-buster")):
             import subprocess as _sp
+
             for suffix in ("-bullseye", "-bookworm"):
                 candidate = f"golang:{go_ver}{suffix}"
                 ok = _sp.run(
                     f"docker manifest inspect {candidate}",
-                    shell=True, capture_output=True,
+                    shell=True,
+                    capture_output=True,
                 )
                 if ok.returncode == 0:
                     detected = candidate
@@ -141,13 +143,14 @@ class GenericDBBuildManager:
 
     def _build_artifact(self):
         """Run spec.build_cmd inside the resolved build image with the source tree mounted."""
-        import os, tempfile
+        import os
+        import tempfile
+
         build_image = self._resolve_build_image()
         host_uid = os.getuid()
         host_gid = os.getgid()
         logger.info(
-            f"[GenericBuildMgr] Building {self.spec.name} inside {build_image} "
-            f"— command: {self.spec.build_cmd}"
+            f"[GenericBuildMgr] Building {self.spec.name} inside {build_image} — command: {self.spec.build_cmd}"
         )
         # Docker runs as root inside the container and writes root-owned files
         # into the bind-mounted source tree. Without intervention, the host user
@@ -166,9 +169,7 @@ class GenericDBBuildManager:
             f"git config --global --add safe.directory {self.source_path}\n"
             f"{self.spec.build_cmd}\n"
         )
-        with tempfile.NamedTemporaryFile(
-            mode='w', suffix='.sh', prefix='/tmp/sregym-build-', delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", prefix="/tmp/sregym-build-", delete=False) as f:
             f.write(script_content)
             script_path = f.name
         os.chmod(script_path, 0o755)
@@ -186,11 +187,8 @@ class GenericDBBuildManager:
             if result.returncode != 0:
                 out = result.stdout[-3000:] if result.stdout else ""
                 err = result.stderr[-3000:] if result.stderr else ""
-                raise RuntimeError(
-                    f"Build failed for {self.spec.name}:\n"
-                    f"--- stdout ---\n{out}\n--- stderr ---\n{err}"
-                )
-            logger.info(f"[GenericBuildMgr] Build succeeded")
+                raise RuntimeError(f"Build failed for {self.spec.name}:\n--- stdout ---\n{out}\n--- stderr ---\n{err}")
+            logger.info("[GenericBuildMgr] Build succeeded")
         finally:
             os.unlink(script_path)
 
@@ -204,7 +202,9 @@ class GenericDBBuildManager:
         base_image = self._resolve_base_image()
         subprocess.run(
             f"docker pull {base_image}",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         build_ctx = Path(tempfile.mkdtemp(prefix=f"sregym-{self.spec.name}-docker-"))
         try:
@@ -220,8 +220,7 @@ class GenericDBBuildManager:
             )
             if result.returncode != 0:
                 raise RuntimeError(
-                    f"docker buildx build (prebuilt) failed:\n"
-                    f"stdout: {result.stdout}\nstderr: {result.stderr}"
+                    f"docker buildx build (prebuilt) failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
                 )
             logger.info(f"[GenericBuildMgr] Prebuilt image tagged: {image_tag}")
         finally:
@@ -230,7 +229,8 @@ class GenericDBBuildManager:
     def _build_docker_image(self, image_tag: str):
         _exclude = ("-tests.jar", "-sources.jar", "-javadoc.jar", "-test-sources.jar")
         artifacts = [
-            a for a in sorted(self.source_path.glob(self.spec.artifact_glob))
+            a
+            for a in sorted(self.source_path.glob(self.spec.artifact_glob))
             if not any(a.name.endswith(s) for s in _exclude)
         ]
         if not artifacts:
@@ -253,11 +253,13 @@ class GenericDBBuildManager:
         try:
             dest_filename = artifact.name
             shutil.copy2(artifact, build_ctx / dest_filename)
-            dockerfile = "\n".join([
-                f"FROM {base_image}",
-                "USER root",
-                f"COPY {dest_filename} {artifact_dest}",
-            ])
+            dockerfile = "\n".join(
+                [
+                    f"FROM {base_image}",
+                    "USER root",
+                    f"COPY {dest_filename} {artifact_dest}",
+                ]
+            )
             (build_ctx / "Dockerfile").write_text(dockerfile)
 
             platform = self._cluster_platform()
@@ -270,10 +272,7 @@ class GenericDBBuildManager:
                 text=True,
             )
             if result.returncode != 0:
-                raise RuntimeError(
-                    f"docker buildx build failed:\n"
-                    f"stdout: {result.stdout}\nstderr: {result.stderr}"
-                )
+                raise RuntimeError(f"docker buildx build failed:\nstdout: {result.stdout}\nstderr: {result.stderr}")
             logger.info(f"[GenericBuildMgr] Image built: {image_tag}")
         finally:
             shutil.rmtree(build_ctx, ignore_errors=True)
@@ -288,7 +287,8 @@ class GenericDBBuildManager:
         candidate = self.spec.resolved_base_image(self.version)
         check = subprocess.run(
             f"docker manifest inspect {candidate}",
-            shell=True, capture_output=True,
+            shell=True,
+            capture_output=True,
         )
         if check.returncode == 0:
             return candidate
@@ -308,9 +308,7 @@ class GenericDBBuildManager:
                 )
                 return froms[-1]
 
-        raise RuntimeError(
-            f"Base image {candidate!r} not found on Docker Hub and no Dockerfile fallback available."
-        )
+        raise RuntimeError(f"Base image {candidate!r} not found on Docker Hub and no Dockerfile fallback available.")
 
     # ── Cluster image distribution ────────────────────────────────────────────
     # Same three-strategy fallback as CassandraBuildManager:
@@ -321,7 +319,9 @@ class GenericDBBuildManager:
     def _load_into_cluster(self, image_tag: str):
         kind_r = subprocess.run(
             f"kind load docker-image {image_tag}",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         if kind_r.returncode == 0:
             logger.info(f"[GenericBuildMgr] Loaded {image_tag} into kind cluster")
@@ -329,8 +329,7 @@ class GenericDBBuildManager:
         # Log the reason — silent kind failures used to send us down SSH/DaemonSet
         # fallbacks that are both broken on modern kind (no sshd, containerd not docker).
         logger.warning(
-            f"[GenericBuildMgr] kind load failed for {image_tag}: "
-            f"{(kind_r.stderr or kind_r.stdout).strip()[:500]}"
+            f"[GenericBuildMgr] kind load failed for {image_tag}: {(kind_r.stderr or kind_r.stdout).strip()[:500]}"
         )
 
         node_ips = self._get_cluster_node_ips()
@@ -340,8 +339,7 @@ class GenericDBBuildManager:
             failed = []
             for ip in node_ips:
                 cmd = (
-                    f"docker save {image_tag} | gzip | "
-                    f"ssh {ssh_opts} {ssh_user}@{ip} 'sudo docker load || docker load'"
+                    f"docker save {image_tag} | gzip | ssh {ssh_opts} {ssh_user}@{ip} 'sudo docker load || docker load'"
                 )
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
                 if r.returncode == 0:
@@ -358,7 +356,9 @@ class GenericDBBuildManager:
     def _get_cluster_node_ips() -> list[str]:
         result = subprocess.run(
             "kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type==\"InternalIP\")].address}'",
-            shell=True, capture_output=True, text=True,
+            shell=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             return []
@@ -366,12 +366,15 @@ class GenericDBBuildManager:
 
     @staticmethod
     def _ssh_user() -> str:
-        import getpass, os
+        import getpass
+        import os
+
         return os.environ.get("SREGYM_CLUSTER_SSH_USER", "") or getpass.getuser()
 
     @staticmethod
     def _ssh_opts() -> str:
         import os
+
         opts = "-o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes"
         if key := os.environ.get("SREGYM_CLUSTER_SSH_KEY", ""):
             opts += f" -i {key}"
@@ -379,6 +382,7 @@ class GenericDBBuildManager:
 
     def _load_via_daemonset(self, image_tag: str):
         import uuid
+
         ns = "default"
         ds_name = f"sregym-img-loader-{uuid.uuid4().hex[:6]}"
         manifest = f"""\
@@ -412,23 +416,33 @@ spec:
 """
         try:
             subprocess.run(
-                "kubectl apply -f -", shell=True, input=manifest,
-                capture_output=True, text=True, check=True,
+                "kubectl apply -f -",
+                shell=True,
+                input=manifest,
+                capture_output=True,
+                text=True,
+                check=True,
             )
             subprocess.run(
                 f"kubectl rollout status daemonset/{ds_name} -n {ns} --timeout=120s",
-                shell=True, capture_output=True, text=True,
+                shell=True,
+                capture_output=True,
+                text=True,
             )
             pods_result = subprocess.run(
                 f"kubectl get pods -n {ns} -l app={ds_name} "
                 f"-o jsonpath='{{.items[?(@.status.phase==\"Running\")].metadata.name}}'",
-                shell=True, capture_output=True, text=True,
+                shell=True,
+                capture_output=True,
+                text=True,
             )
             pods = [p for p in pods_result.stdout.strip().strip("'").split() if p]
             for pod in pods:
                 r = subprocess.run(
                     f"docker save {image_tag} | kubectl exec -n {ns} -i {pod} -- docker load",
-                    shell=True, capture_output=True, text=True,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
                 )
                 if r.returncode == 0:
                     logger.info(f"[GenericBuildMgr] Image loaded via DaemonSet pod {pod}")
@@ -437,30 +451,36 @@ spec:
         finally:
             subprocess.run(
                 f"kubectl delete daemonset {ds_name} -n {ns} --ignore-not-found",
-                shell=True, capture_output=True,
+                shell=True,
+                capture_output=True,
             )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _make_tag(self, content_hash: str) -> str:
-        versioned = hashlib.sha256(
-            f"{_DOCKERFILE_VERSION}:{content_hash}".encode()
-        ).hexdigest()
-        return f"sregym/{self.spec.name}-patched:{self.version}-{versioned[:8]}"
+        return opaque_build_tag(self.spec.name, self.version, content_hash, _DOCKERFILE_VERSION)
 
     def _image_exists_locally(self, image_tag: str) -> bool:
-        return subprocess.run(
-            f"docker image inspect {image_tag}",
-            shell=True, capture_output=True,
-        ).returncode == 0
+        return (
+            subprocess.run(
+                f"docker image inspect {image_tag}",
+                shell=True,
+                capture_output=True,
+            ).returncode
+            == 0
+        )
 
     @staticmethod
     def _cluster_platform() -> str:
         import platform as _platform
+
         try:
             result = subprocess.run(
                 "kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}'",
-                shell=True, capture_output=True, text=True, timeout=10,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             arch = result.stdout.strip().strip("'")
             if arch:
